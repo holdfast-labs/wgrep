@@ -1,0 +1,74 @@
+[package]
+name = "wgrep"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense OR MIT"
+repository = "https://github.com/abhimanilal/wispd"
+rust-version = "1.95"
+description = "wgrep: ripgrep 15.1.0 with a compact trigram index that skips files proven not to match."
+build = "build.rs"
+
+[[bin]]
+name = "wgrep"
+path = "src/rg/main.rs"
+
+# wgrep-sem: opt-in native semantic ranking. Dedicated binary (not a flag on
+# the byte-identical path) so the vendored rg surface is textually untouched.
+[[bin]]
+name = "wgrep-sem"
+path = "src/sem_bin/main.rs"
+required-features = ["semantic"]
+
+# Direct dependencies are pinned to ripgrep 15.1.0's Cargo.lock so that the
+# vendored search path behaves exactly like the upstream `rg` binary.
+[dependencies]
+anyhow = "=1.0.100"
+bstr = "=1.12.0"
+grep = "=0.4.1"
+ignore = "=0.4.24"
+lexopt = "=0.3.1"
+log = "=0.4.28"
+serde_json = "=1.0.145"
+termcolor = "=1.4.1"
+textwrap = { version = "=0.16.2", default-features = false }
+regex-syntax = "=0.8.8"
+memmap2 = "=0.9.9"
+notify = { version = "8", default-features = false }
+# wgrep-sem only (optional, behind the `semantic` feature): pinned
+# static-embedding stack (lookup + pool + normalize, no transformer at
+# query time). Nothing on the default search path uses these, and a plain
+# `cargo build --bin wgrep` never compiles them. Build the semantic
+# binary with: cargo build --release --features semantic --bin wgrep-sem
+half = { version = "2", optional = true }
+safetensors = { version = "0.6", optional = true }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"], optional = true }
+ureq = { version = "3", optional = true }
+sha2 = { version = "0.10", optional = true }
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+
+[features]
+default = ["pcre2"]
+# Matches the upstream release build of `rg` 15.1.0 (features:+pcre2).
+pcre2 = ["grep/pcre2"]
+# Opt-in native semantic ranking. Pulls the embedding/tokenizer/download
+# stack; required by the `wgrep-sem` binary, never by `wgrep`.
+semantic = ["half", "safetensors", "tokenizers", "ureq", "sha2", "tree-sitter", "tree-sitter-rust"]
+
+[dev-dependencies]
+tempfile = "3"
+
+# The musl (static) release build uses jemalloc, matching ripgrep's release
+# build; the `#[global_allocator]` in `main.rs` is gated on the same cfg.
+[target.'cfg(all(target_env = "musl", target_pointer_width = "64"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+# Standalone workspace: its Cargo.lock starts from ripgrep 15.1.0's lockfile
+# so every transitive dependency matches the upstream `rg` binary.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[patch.crates-io]
+notify = { path = "../../vendor/notify" }
