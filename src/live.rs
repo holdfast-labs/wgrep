@@ -1,7 +1,7 @@
 //! Mutable, atomically published sgrep-compatible corpus snapshots.
 use crate::{
-    CODE, Chunk, LoadedModel, ModelChoice, Result, TEXT, bm25_borrowed, cache, identifier_pattern,
-    is_prose, make_chunk, rank_impl, words,
+    CODE, Chunk, LoadedModel, ModelChoice, Result, TEXT, cache, identifier_pattern, is_prose,
+    make_chunk, rank_impl, words,
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -28,6 +28,25 @@ const SNAPSHOT_MAX_META: usize = 1024 * 1024;
 /// Rewrite the cache for a single-file batch only when that many files change
 /// at once. This avoids a synchronous 65 MB write on every editor save.
 const SNAPSHOT_REWRITE_FILES: usize = 16;
+
+/// Return freed worker-arena pages to the OS after a large build.
+///
+/// Chunking and interning release many short-lived allocations on rayon worker
+/// threads. glibc keeps those pages in its arenas, so a resident daemon would
+/// otherwise report them as RSS forever. This changes no live data and is a
+/// no-op off glibc.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() {}
 
 /// Phase timing for index builds. Off by default; `WG_LIVE_TIMING=1` prints
 /// one line per phase to stderr so a slow repository can be profiled without a
@@ -73,15 +92,165 @@ impl ModelPool {
     }
 }
 
+/// Compact per-chunk term counts for one file.
+///
+/// `terms` is chunk-major: chunk `i` owns `terms[offsets[i]..offsets[i+1]]`,
+/// sorted by term id. `lengths[i]` is the exact word count that BM25 used to
+/// compute from `counts.values().sum()`.
+#[derive(Clone, Default)]
+struct FileLexical {
+    terms: Vec<(u32, u32)>,
+    offsets: Vec<u32>,
+    lengths: Vec<u32>,
+}
+
+impl FileLexical {
+    fn chunk(&self, i: usize) -> (&[(u32, u32)], u32) {
+        let start = self.offsets[i] as usize;
+        let end = self.offsets[i + 1] as usize;
+        (&self.terms[start..end], self.lengths[i])
+    }
+}
+
+/// Per-chunk input to the term interner. A rebuilt chunk carries strings; a
+/// chunk reused from the previous snapshot carries ids that are still valid.
+enum RawChunk {
+    Raw { terms: Vec<(String, u32)>, length: u32 },
+    Known { terms: Vec<(u32, u32)>, length: u32 },
+}
+
+/// Maps term strings to stable per-snapshot ids. Ids are never removed, so a
+/// carried-forward dictionary stays valid for every unchanged `FileData`.
+struct TermInterner {
+    lookup: HashMap<Arc<str>, u32>,
+}
+
+impl TermInterner {
+    fn new() -> Self {
+        Self {
+            lookup: HashMap::new(),
+        }
+    }
+
+    fn from_lookup(lookup: &HashMap<Arc<str>, u32>) -> Self {
+        Self {
+            lookup: lookup.clone(),
+        }
+    }
+
+    fn intern(&mut self, term: &str) -> u32 {
+        if let Some(&id) = self.lookup.get(term) {
+            return id;
+        }
+        let id = self.lookup.len() as u32;
+        self.lookup.insert(Arc::from(term), id);
+        id
+    }
+
+    fn intern_file(&mut self, raw: Vec<RawChunk>) -> FileLexical {
+        let mut lexical = FileLexical {
+            terms: Vec::new(),
+            offsets: Vec::with_capacity(raw.len() + 1),
+            lengths: Vec::with_capacity(raw.len()),
+        };
+        lexical.offsets.push(0);
+        for chunk in raw {
+            let (mut pairs, length) = match chunk {
+                RawChunk::Raw { terms, length } => (
+                    terms
+                        .into_iter()
+                        .map(|(term, count)| (self.intern(&term), count))
+                        .collect::<Vec<_>>(),
+                    length,
+                ),
+                RawChunk::Known { terms, length } => (terms, length),
+            };
+            pairs.sort_unstable_by_key(|pair| pair.0);
+            let mut merged: Vec<(u32, u32)> = Vec::with_capacity(pairs.len());
+            for (term, count) in pairs {
+                if let Some(last) = merged.last_mut()
+                    && last.0 == term
+                {
+                    last.1 += count;
+                    continue;
+                }
+                merged.push((term, count));
+            }
+            lexical.lengths.push(length);
+            lexical.terms.extend_from_slice(&merged);
+            lexical.offsets.push(lexical.terms.len() as u32);
+        }
+        lexical
+    }
+}
+
+/// Snapshot-wide BM25 state: one term dictionary, a document-frequency table,
+/// and an inverted posting list per term.
+///
+/// Posting inner buffers are `Arc`-shared so an edit copies only the terms that
+/// the edited file actually mentions. A posting is `(chunk id, term count)`.
+struct LexicalIndex {
+    lookup: HashMap<Arc<str>, u32>,
+    df: Vec<u32>,
+    postings: Vec<Arc<Vec<(u32, u32)>>>,
+    lengths: Vec<u32>,
+    average: f64,
+}
+
+impl LexicalIndex {
+    fn empty() -> Self {
+        Self {
+            lookup: HashMap::new(),
+            df: Vec::new(),
+            postings: Vec::new(),
+            lengths: Vec::new(),
+            average: 1.0,
+        }
+    }
+
+    fn average(lengths: &[u32], corpus_len: usize) -> f64 {
+        let total: usize = lengths.iter().map(|&length| length as usize).sum();
+        (total as f64 / corpus_len.max(1) as f64).max(1.0)
+    }
+
+    /// Bit-identical replacement for `crate::bm25` over the resident rows.
+    ///
+    /// Terms are visited in the caller's sorted order, and a chunk receives its
+    /// contributions in that same order, so every f64 addition has the same
+    /// operands and order as the per-chunk `counts` scan it replaces.
+    fn bm25(&self, terms: &[String]) -> Vec<f64> {
+        // `f64`'s empty `Sum` is negative zero on this toolchain, so a chunk
+        // with no matching term must stay negative zero to keep output bytes
+        // and `total_cmp` tie-breaks identical to the old map scan.
+        let mut scores = vec![-0.0f64; self.lengths.len()];
+        let corpus_len = self.lengths.len();
+        for term in terms {
+            let Some(&id) = self.lookup.get(term.as_str()) else {
+                continue;
+            };
+            let df = self.df[id as usize] as f64;
+            let idf = (1.0 + (corpus_len as f64 - df + 0.5) / (df + 0.5)).ln();
+            for &(chunk, count) in self.postings[id as usize].iter() {
+                let count = count as f64;
+                let length = self.lengths[chunk as usize] as f64;
+                scores[chunk as usize] +=
+                    idf * count * 2.5 / (count + 1.5 * (0.25 + 0.75 * length / self.average));
+            }
+        }
+        scores
+    }
+}
+
 /// One source file's immutable chunks and their passage vectors.
 ///
 /// Both lists are `Arc`-shared. An unchanged file therefore survives a refresh
-/// as one `Arc` clone, with no content, word-map or embedding copy. The vectors
+/// as one `Arc` clone, with no content, term or embedding copy. The vectors
 /// stay valid only for the model revision that produced them.
 struct FileData {
     digest: [u8; 32],
     chunks: Vec<Arc<Chunk>>,
     vectors: Vec<Arc<Vec<f32>>>,
+    lexical: FileLexical,
 }
 
 /// One atomically published corpus state.
@@ -93,8 +262,45 @@ struct Snapshot {
     files: HashMap<PathBuf, Arc<FileData>>,
     chunks: Vec<Arc<Chunk>>,
     vectors: Vec<Arc<Vec<f32>>>,
+    lexical: Arc<LexicalIndex>,
     model: Arc<LoadedModel>,
     generation: u64,
+}
+
+/// Per-component memory accounting for one published snapshot.
+///
+/// The values sum allocation sizes where Rust exposes them (capacity for
+/// strings and vectors, element counts for hash maps) and add a small structural
+/// estimate for hash tables. They are an accounting pass for diagnosis, not an
+/// allocator measurement.
+#[derive(Serialize, Clone, Default)]
+pub struct MemoryReport {
+    pub files: usize,
+    pub chunks: usize,
+    pub terms: usize,
+    pub terms_bytes: u64,
+    pub postings_entries: u64,
+    pub lexical_bytes: u64,
+    pub four_byte_words: usize,
+    pub chunk_struct_bytes: u64,
+    pub chunk_arc_headers: u64,
+    pub content_bytes: u64,
+    pub content_len: u64,
+    pub path_bytes: u64,
+    pub path_len: u64,
+    pub counts_entries: u64,
+    pub counts_capacity: u64,
+    pub counts_table_bytes: u64,
+    pub counts_key_bytes: u64,
+    pub rss_kib: u64,
+    pub vector_value_bytes: u64,
+    pub vector_struct_bytes: u64,
+    pub vector_arc_headers: u64,
+    pub flat_view_bytes: u64,
+    pub file_map_bytes: u64,
+    pub file_data_bytes: u64,
+    pub model_table_bytes: u64,
+    pub total_estimate_bytes: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -136,7 +342,13 @@ enum PreparedFile {
     Removed(PathBuf),
     Unchanged,
     Empty(PathBuf, [u8; 32]),
-    Rebuilt(PathBuf, FileData, Vec<Option<Arc<Vec<f32>>>>),
+    Rebuilt(
+        PathBuf,
+        [u8; 32],
+        Vec<Arc<Chunk>>,
+        Vec<RawChunk>,
+        Vec<Option<Arc<Vec<f32>>>>,
+    ),
 }
 
 /// Cumulative per-file phase times from the parallel stage. They are additive
@@ -243,10 +455,33 @@ struct CachedEntry {
     vectors: Vec<Arc<Vec<f32>>>,
 }
 
+/// Move one chunk's owned word map into the compact interner input and drop
+/// the map allocation immediately.
+fn raw_from_chunk(chunk: &mut Chunk) -> RawChunk {
+    let length = chunk.counts.values().sum::<usize>() as u32;
+    let terms = chunk
+        .counts
+        .drain()
+        .map(|(term, count)| (term, count as u32))
+        .collect();
+    // `drain` keeps the table allocation; reset so the resident chunk holds no
+    // word-map memory at all.
+    chunk.counts = HashMap::new();
+    RawChunk::Raw { terms, length }
+}
+
+struct RebuiltCached {
+    rel: PathBuf,
+    digest: [u8; 32],
+    chunks: Vec<Arc<Chunk>>,
+    raw: Vec<RawChunk>,
+    vectors: Vec<Arc<Vec<f32>>>,
+}
+
 /// Rebuild one cached file from the live bytes. The cached ranges are applied
 /// with the same line slicing and `make_chunk` as a fresh build. A stale or
 /// malformed entry returns `None`; the caller's reconcile rebuilds that file.
-fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<(PathBuf, Arc<FileData>)> {
+fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<RebuiltCached> {
     let bytes = std::fs::read(root.join(&entry.rel)).ok()?;
     let actual: [u8; 32] = Sha256::digest(&bytes).into();
     if actual != entry.digest {
@@ -256,38 +491,35 @@ fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<(PathBuf, Arc
         if !entry.ranges.is_empty() {
             return None;
         }
-        return Some((
-            entry.rel.clone(),
-            Arc::new(FileData {
-                digest: entry.digest,
-                chunks: Vec::new(),
-                vectors: Vec::new(),
-            }),
-        ));
+        return Some(RebuiltCached {
+            rel: entry.rel.clone(),
+            digest: entry.digest,
+            chunks: Vec::new(),
+            raw: Vec::new(),
+            vectors: Vec::new(),
+        });
     }
     let source = normalize_source(&bytes);
     let lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let shared_path = crate::SharedStr::new(entry.rel.to_string_lossy());
     let mut rows = Vec::with_capacity(entry.ranges.len());
+    let mut raw = Vec::with_capacity(entry.ranges.len());
     for &(first, last) in &entry.ranges {
         if first < 1 || last < first || last > lines.len() {
             return None;
         }
         let content = lines[first - 1..last].concat();
-        rows.push(Arc::new(make_chunk(
-            entry.rel.to_string_lossy().into_owned(),
-            first,
-            last,
-            content,
-        )));
+        let mut chunk = make_chunk(shared_path.clone(), first, last, content);
+        raw.push(raw_from_chunk(&mut chunk));
+        rows.push(Arc::new(chunk));
     }
-    Some((
-        entry.rel.clone(),
-        Arc::new(FileData {
-            digest: entry.digest,
-            chunks: rows,
-            vectors: entry.vectors.clone(),
-        }),
-    ))
+    Some(RebuiltCached {
+        rel: entry.rel.clone(),
+        digest: entry.digest,
+        chunks: rows,
+        raw,
+        vectors: entry.vectors.clone(),
+    })
 }
 
 fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Result<Snapshot> {
@@ -377,8 +609,18 @@ fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Re
     // rebuilds it.
     let rebuilt = parallel_map(&entries, |entry| rebuild_cached_file(root, entry));
     let mut files = HashMap::with_capacity(rebuilt.len());
+    let mut interner = TermInterner::new();
     for item in rebuilt.into_iter().flatten() {
-        files.insert(item.0, item.1);
+        let lexical = interner.intern_file(item.raw);
+        files.insert(
+            item.rel,
+            Arc::new(FileData {
+                digest: item.digest,
+                chunks: item.chunks,
+                vectors: item.vectors,
+                lexical,
+            }),
+        );
     }
     // Publish the same deterministic flat order as `refresh`.
     let mut ordered: Vec<PathBuf> = files.keys().cloned().collect();
@@ -389,18 +631,147 @@ fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Re
     });
     let mut chunks = Vec::with_capacity(seen_chunks);
     let mut vectors = Vec::with_capacity(seen_chunks);
-    for rel in ordered {
-        let data = &files[&rel];
+    for rel in &ordered {
+        let data = &files[rel];
         chunks.extend(data.chunks.iter().cloned());
         vectors.extend(data.vectors.iter().cloned());
     }
+    let lexical = build_lexical(interner.lookup, &files, &ordered, chunks.len());
     Ok(Snapshot {
         files,
         chunks,
         vectors,
+        lexical: Arc::new(lexical),
         model: model.clone(),
         generation: 1,
     })
+}
+
+/// Build one complete lexical index from per-file compact term lists.
+fn build_lexical(
+    lookup: HashMap<Arc<str>, u32>,
+    files: &HashMap<PathBuf, Arc<FileData>>,
+    ordered: &[PathBuf],
+    chunk_count: usize,
+) -> LexicalIndex {
+    let term_count = lookup.len();
+    let mut df = vec![0u32; term_count];
+    let mut postings: Vec<Vec<(u32, u32)>> = (0..term_count).map(|_| Vec::new()).collect();
+    let mut lengths = Vec::with_capacity(chunk_count);
+    let mut id = 0u32;
+    for rel in ordered {
+        let data = &files[rel];
+        for j in 0..data.chunks.len() {
+            let (terms, length) = data.lexical.chunk(j);
+            lengths.push(length);
+            for &(term, count) in terms {
+                df[term as usize] += 1;
+                postings[term as usize].push((id, count));
+            }
+            id += 1;
+        }
+    }
+    debug_assert_eq!(id as usize, chunk_count);
+    let average = LexicalIndex::average(&lengths, chunk_count);
+    let postings = postings.into_iter().map(Arc::new).collect();
+    LexicalIndex {
+        lookup,
+        df,
+        postings,
+        lengths,
+        average,
+    }
+}
+
+/// One changed file whose flat chunk range is unchanged, so its ids are stable.
+struct ChangedSpan {
+    start: usize,
+    len: usize,
+    old: Arc<FileData>,
+    new: Arc<FileData>,
+}
+
+/// Update only the terms that a set of same-layout file edits touched.
+///
+/// Unaffected posting buffers stay `Arc`-shared with the previous snapshot.
+/// `spans` must be sorted by `start`.
+fn update_lexical(
+    old: &LexicalIndex,
+    lookup: HashMap<Arc<str>, u32>,
+    spans: &[ChangedSpan],
+    chunk_count: usize,
+) -> LexicalIndex {
+    let mut df = old.df.clone();
+    df.resize(lookup.len(), 0);
+    let mut postings = old.postings.clone();
+    postings.resize_with(lookup.len(), || Arc::new(Vec::new()));
+    let mut lengths = old.lengths.clone();
+    lengths.resize(chunk_count, 0);
+    // Explicit ids avoid ambiguous ordering at a zero-length span boundary.
+    let removed: HashSet<u32> = spans
+        .iter()
+        .flat_map(|span| span.start as u32..(span.start + span.len) as u32)
+        .collect();
+    let mut fresh: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut affected: HashSet<u32> = HashSet::new();
+    for span in spans {
+        for j in 0..span.old.chunks.len() {
+            let (terms, _) = span.old.lexical.chunk(j);
+            for &(term, _) in terms {
+                affected.insert(term);
+            }
+        }
+        for j in 0..span.new.chunks.len() {
+            let (terms, _) = span.new.lexical.chunk(j);
+            let id = (span.start + j) as u32;
+            for &(term, count) in terms {
+                affected.insert(term);
+                fresh.entry(term).or_default().push((id, count));
+            }
+        }
+        for j in 0..span.len {
+            lengths[span.start + j] = span.new.lexical.lengths[j];
+        }
+    }
+    for term in affected {
+        let replaced = fresh.remove(&term);
+        let kept: Vec<(u32, u32)> = postings[term as usize]
+            .iter()
+            .copied()
+            .filter(|&(id, _)| !removed.contains(&id))
+            .collect();
+        if replaced.is_none() && kept.len() == postings[term as usize].len() {
+            continue;
+        }
+        let merged = match replaced {
+            Some(add) => {
+                let mut merged = Vec::with_capacity(kept.len() + add.len());
+                let mut a = kept.into_iter().peekable();
+                let mut b = add.into_iter().peekable();
+                loop {
+                    match (a.peek(), b.peek()) {
+                        (Some(x), Some(y)) if x.0 <= y.0 => merged.push(a.next().unwrap()),
+                        (Some(_), Some(_)) => merged.push(b.next().unwrap()),
+                        (Some(_), None) => merged.push(a.next().unwrap()),
+                        (None, Some(_)) => merged.push(b.next().unwrap()),
+                        (None, None) => break,
+                    }
+                }
+                merged
+            }
+            None => kept,
+        };
+        df[term as usize] = merged.len() as u32;
+        postings[term as usize] = Arc::new(merged);
+    }
+    let average = LexicalIndex::average(&lengths, chunk_count);
+    LexicalIndex {
+        lookup,
+        df,
+        postings,
+        lengths,
+        average,
+    }
 }
 
 /// Write the v1 snapshot cache atomically. A failure is reported to the caller
@@ -517,28 +888,36 @@ fn prepare_file(
     let ranges = crate::splitter::ranges(&source, rel)?;
     BuildTimings::add(&timings.chunk_ns, chunk);
     let previous = old.get(rel);
+    let shared_path = crate::SharedStr::new(rel.to_string_lossy());
     let mut chunks = Vec::new();
+    let mut raw = Vec::new();
     let mut reused = Vec::new();
     for (first, last) in ranges {
         let assemble = Instant::now();
         let content = lines[first - 1..last].concat();
         // Reuse the previous immutable chunk when this range kept the same
-        // bounds and content; then its vector still applies.
+        // bounds and content; then its vector and term ids still apply.
         let hit = previous.and_then(|data| {
             data.chunks
                 .iter()
-                .position(|c| c.start == first && c.end == last && c.content == content)
+                .position(|c| c.start == first && c.end == last && &*c.content == content)
         });
         BuildTimings::add(&timings.chunk_ns, assemble);
         match hit {
             Some(i) => {
                 let data = previous.unwrap();
                 chunks.push(data.chunks[i].clone());
+                let (terms, length) = data.lexical.chunk(i);
+                raw.push(RawChunk::Known {
+                    terms: terms.to_vec(),
+                    length,
+                });
                 reused.push(data.vectors.get(i).cloned());
             }
             None => {
                 let counts = Instant::now();
-                let chunk = make_chunk(rel.to_string_lossy().into_owned(), first, last, content);
+                let mut chunk = make_chunk(shared_path.clone(), first, last, content);
+                raw.push(raw_from_chunk(&mut chunk));
                 BuildTimings::add(&timings.counts_ns, counts);
                 chunks.push(Arc::new(chunk));
                 reused.push(None);
@@ -547,11 +926,9 @@ fn prepare_file(
     }
     Ok(PreparedFile::Rebuilt(
         rel.clone(),
-        FileData {
-            digest,
-            chunks,
-            vectors: Vec::new(),
-        },
+        digest,
+        chunks,
+        raw,
         reused,
     ))
 }
@@ -597,6 +974,7 @@ impl LiveIndex {
                 files: HashMap::new(),
                 chunks: Vec::new(),
                 vectors: Vec::new(),
+                lexical: Arc::new(LexicalIndex::empty()),
                 model: initial_model.clone(),
                 generation: 0,
             })),
@@ -626,6 +1004,7 @@ impl LiveIndex {
             mark("cache_load", &mut phase);
         }
         index.refresh(&[], true)?;
+        trim_allocator();
         if std::env::var_os("WG_LIVE_TIMING").is_some() {
             eprintln!("wg live: open_total={}ms", started.elapsed().as_millis());
         }
@@ -635,6 +1014,98 @@ impl LiveIndex {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Sum the allocation capacities of one published snapshot by component.
+    pub fn memory_report(&self) -> MemoryReport {
+        let s = self.snapshot.read().unwrap().clone();
+        let n = s.chunks.len();
+        let mut report = MemoryReport {
+            files: s.files.len(),
+            chunks: n,
+            four_byte_words: n * 256,
+            chunk_struct_bytes: (n * std::mem::size_of::<Chunk>()) as u64,
+            chunk_arc_headers: (n * 2 * std::mem::size_of::<usize>()) as u64,
+            vector_value_bytes: (n * 256 * std::mem::size_of::<f32>()) as u64,
+            vector_struct_bytes: (n * std::mem::size_of::<Vec<f32>>()) as u64,
+            vector_arc_headers: (n * 2 * std::mem::size_of::<usize>()) as u64,
+            flat_view_bytes: ((s.chunks.capacity() + s.vectors.capacity())
+                * std::mem::size_of::<usize>()) as u64,
+            file_map_bytes: (s.files.capacity()
+                * (std::mem::size_of::<PathBuf>()
+                    + std::mem::size_of::<Arc<FileData>>()
+                    + 1)) as u64,
+            model_table_bytes: (s.model.table.len() * std::mem::size_of::<f32>()) as u64,
+            ..MemoryReport::default()
+        };
+        for (path, data) in &s.files {
+            report.file_map_bytes += path.as_os_str().len() as u64;
+            report.file_data_bytes += std::mem::size_of::<FileData>() as u64;
+            report.file_data_bytes += ((data.chunks.capacity() + data.vectors.capacity())
+                * std::mem::size_of::<usize>()) as u64;
+            report.file_data_bytes += (data.lexical.terms.capacity()
+                * std::mem::size_of::<(u32, u32)>()
+                + data.lexical.offsets.capacity() * std::mem::size_of::<u32>()
+                + data.lexical.lengths.capacity() * std::mem::size_of::<u32>())
+                as u64;
+            for chunk in &data.chunks {
+                report.content_bytes += chunk.content.len() as u64;
+                report.content_len += chunk.content.len() as u64;
+                report.path_bytes += chunk.path.len() as u64;
+                report.path_len += chunk.path.len() as u64;
+                report.counts_entries += chunk.counts.len() as u64;
+                report.counts_capacity += chunk.counts.capacity() as u64;
+                report.counts_table_bytes += chunk.counts.capacity() as u64
+                    * (std::mem::size_of::<String>() + std::mem::size_of::<usize>() + 1) as u64;
+                for key in chunk.counts.keys() {
+                    report.counts_key_bytes += key.capacity() as u64;
+                }
+            }
+        }
+        let index = &s.lexical;
+        report.terms = index.lookup.len();
+        report.terms_bytes = (index.lookup.capacity()
+            * (std::mem::size_of::<Arc<str>>() + std::mem::size_of::<u32>() + 1)) as u64
+            + index.lookup.keys().map(|key| key.len() as u64).sum::<u64>();
+        report.postings_entries = index.postings.iter().map(|row| row.len() as u64).sum();
+        let postings_bytes: u64 = index
+            .postings
+            .iter()
+            .map(|row| {
+                (row.capacity() * std::mem::size_of::<(u32, u32)>()
+                    + std::mem::size_of::<Vec<(u32, u32)>>()
+                    + 2 * std::mem::size_of::<usize>()) as u64
+            })
+            .sum();
+        report.lexical_bytes = report.terms_bytes
+            + (index.df.len() * std::mem::size_of::<u32>()) as u64
+            + (index.lengths.len() * std::mem::size_of::<u32>()) as u64
+            + postings_bytes;
+        report.rss_kib = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("VmRSS:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse().ok())
+                })
+            })
+            .unwrap_or(0);
+        report.total_estimate_bytes = report.chunk_struct_bytes
+            + report.chunk_arc_headers
+            + report.content_bytes
+            + report.path_bytes
+            + report.counts_table_bytes
+            + report.counts_key_bytes
+            + report.vector_value_bytes
+            + report.vector_struct_bytes
+            + report.vector_arc_headers
+            + report.flat_view_bytes
+            + report.file_map_bytes
+            + report.file_data_bytes
+            + report.model_table_bytes
+            + report.lexical_bytes;
+        report
     }
 
     pub fn stats(&self) -> LiveStats {
@@ -697,6 +1168,10 @@ impl LiveIndex {
         let mut changed_paths: HashSet<PathBuf> = HashSet::new();
         // A changed file can reuse the vector of any chunk `Arc` it kept.
         let mut reused_vectors: HashMap<PathBuf, Vec<Option<Arc<Vec<f32>>>>> = HashMap::new();
+        // Chunk ids are stable only when no path appears or disappears and no
+        // changed file gains or loses a chunk. The common single-file edit does.
+        let mut layout_same = !reconcile || old.files.keys().all(|path| target.contains(path));
+        let mut interner: Option<TermInterner> = None;
         let mut selected: Vec<PathBuf> = target.iter().cloned().collect();
         // Sort before the parallel read so an error returns for the first path in
         // byte order, not for whichever worker happens to fail first.
@@ -723,10 +1198,18 @@ impl LiveIndex {
                 PreparedFile::Removed(rel) => {
                     if files.remove(&rel).is_some() {
                         changed_paths.insert(rel);
+                        layout_same = false;
                     }
                 }
                 PreparedFile::Unchanged => {}
                 PreparedFile::Empty(rel, digest) => {
+                    if old
+                        .files
+                        .get(&rel)
+                        .is_some_and(|data| !data.chunks.is_empty())
+                    {
+                        layout_same = false;
+                    }
                     changed_paths.insert(rel.clone());
                     files.insert(
                         rel,
@@ -734,13 +1217,30 @@ impl LiveIndex {
                             digest,
                             chunks: Vec::new(),
                             vectors: Vec::new(),
+                            lexical: FileLexical::default(),
                         }),
                     );
                 }
-                PreparedFile::Rebuilt(rel, data, reused) => {
+                PreparedFile::Rebuilt(rel, digest, chunks, raw, reused) => {
+                    if old.files.get(&rel).map(|data| data.chunks.len())
+                        != Some(chunks.len())
+                    {
+                        layout_same = false;
+                    }
+                    let intern = interner
+                        .get_or_insert_with(|| TermInterner::from_lookup(&old.lexical.lookup));
+                    let lexical = intern.intern_file(raw);
                     changed_paths.insert(rel.clone());
                     reused_vectors.insert(rel.clone(), reused);
-                    files.insert(rel, Arc::new(data));
+                    files.insert(
+                        rel,
+                        Arc::new(FileData {
+                            digest,
+                            chunks,
+                            vectors: Vec::new(),
+                            lexical,
+                        }),
+                    );
                 }
             }
         }
@@ -814,8 +1314,9 @@ impl LiveIndex {
         let total: usize = files.values().map(|d| d.chunks.len()).sum();
         let mut chunks: Vec<Arc<Chunk>> = Vec::with_capacity(total);
         let mut slots: Vec<Option<Arc<Vec<f32>>>> = Vec::with_capacity(total);
-        let mut pending: Vec<String> = Vec::new();
+        let mut missing: Vec<usize> = Vec::new();
         let mut spans: Vec<(PathBuf, usize, usize)> = Vec::new();
+        let mut file_starts: HashMap<PathBuf, (usize, usize)> = HashMap::new();
         for rel in &ordered {
             let data = &files[rel];
             let file_changed = changed_paths.contains(rel);
@@ -832,31 +1333,36 @@ impl LiveIndex {
                 match vector {
                     Some(v) => slots.push(Some(v)),
                     None => {
-                        pending.push(format!("{}\n{}", chunk.path, chunk.content));
+                        missing.push(slots.len());
                         slots.push(None);
                     }
                 }
             }
+            let len = chunks.len() - start;
+            file_starts.insert(rel.clone(), (start, len));
             if switch || file_changed {
-                spans.push((rel.clone(), start, chunks.len() - start));
+                spans.push((rel.clone(), start, len));
             }
         }
         mark("assemble_rows", &mut phase);
-        let encoded = pending.len();
-        // One tokenizer call per passage, distributed over the worker pool.
-        // Nested batch parallelism oversubscribed the 4-vCPU host.
-        let filled: Vec<Arc<Vec<f32>>> = model
-            .embed_parallel(&pending)?
-            .into_iter()
-            .map(Arc::new)
-            .collect();
+        let encoded = missing.len();
+        // Encode in bounded batches. The old path materialized one passage
+        // string for every chunk at once; batching keeps that copy transient.
+        let mut embedded: Vec<Arc<Vec<f32>>> = Vec::with_capacity(encoded);
+        for batch in missing.chunks(512) {
+            let texts: Vec<String> = batch
+                .iter()
+                .map(|&i| format!("{}\n{}", chunks[i].path, chunks[i].content))
+                .collect();
+            embedded.extend(model.embed_parallel(&texts)?.into_iter().map(Arc::new));
+        }
         mark("embed", &mut phase);
-        let mut filled = filled.into_iter();
+        let mut embedded = embedded.into_iter();
         let vectors: Vec<Arc<Vec<f32>>> = slots
             .into_iter()
-            .map(|slot| slot.unwrap_or_else(|| filled.next().unwrap()))
+            .map(|slot| slot.unwrap_or_else(|| embedded.next().unwrap()))
             .collect();
-        debug_assert!(filled.next().is_none());
+        debug_assert!(embedded.next().is_none());
         // Verify only the input paths. Ordinary file updates must not rescan the
         // unchanged repository; full reconciles additionally recheck membership.
         for rel in &target {
@@ -886,13 +1392,46 @@ impl LiveIndex {
                     digest: data.digest,
                     chunks: data.chunks.clone(),
                     vectors: vectors[start..start + len].to_vec(),
+                    lexical: data.lexical.clone(),
                 }),
             );
         }
+        let lookup = interner
+            .map(|intern| intern.lookup)
+            .unwrap_or_else(|| old.lexical.lookup.clone());
+        let lexical = if changed == 0 {
+            // A model switch rebuilds vectors but leaves the term index alone.
+            old.lexical.clone()
+        } else if layout_same {
+            let mut changed_spans: Vec<ChangedSpan> = changed_paths
+                .iter()
+                .filter_map(|rel| {
+                    let (start, len) = *file_starts.get(rel)?;
+                    let old_data = old.files.get(rel)?.clone();
+                    let new_data = files.get(rel)?.clone();
+                    (old_data.chunks.len() == len).then_some(ChangedSpan {
+                        start,
+                        len,
+                        old: old_data,
+                        new: new_data,
+                    })
+                })
+                .collect();
+            changed_spans.sort_unstable_by_key(|span| span.start);
+            Arc::new(update_lexical(
+                &old.lexical,
+                lookup,
+                &changed_spans,
+                chunks.len(),
+            ))
+        } else {
+            Arc::new(build_lexical(lookup, &files, &ordered, chunks.len()))
+        };
         let next = Arc::new(Snapshot {
             files,
             chunks,
             vectors,
+            lexical,
             model,
             generation: old.generation + 1,
         });
@@ -903,6 +1442,10 @@ impl LiveIndex {
         mark("publish", &mut phase);
         if self.should_write_cache(reconcile, changed) {
             self.write_cache(&next);
+        }
+        if !layout_same || encoded >= 512 {
+            drop(old);
+            trim_allocator();
         }
         Ok(UpdateStats {
             changed_files: changed,
@@ -984,12 +1527,9 @@ impl LiveIndex {
         if snapshot.chunks.is_empty() {
             return Ok(Vec::new());
         }
-        // Score the borrowed `Arc` rows directly: no content or vector clone.
-        let lexical = bm25_borrowed(
-            snapshot.chunks.iter().map(|chunk| chunk.as_ref()),
-            &terms,
-            snapshot.chunks.len(),
-        );
+        // The compact postings touch only matching chunks. Contributions reach
+        // each chunk in query-term order, as the old per-chunk map scan did.
+        let lexical = snapshot.lexical.bm25(&terms);
         let q = snapshot.model.embed(vec![query.to_string()])?.remove(0);
         let similarities: Vec<f64> = snapshot
             .vectors
@@ -1190,6 +1730,64 @@ mod tests {
     }
 
     #[test]
+    fn compact_bm25_matches_the_per_chunk_map_scan_bit_for_bit() {
+        let (_dir, root) = fixture();
+        let mut body = String::new();
+        for i in 0..300 {
+            body.push_str(&format!(
+                "fn helper_{i}() {{ let alpha = {i}; let beta = alpha + {i}; }}\n"
+            ));
+        }
+        std::fs::write(root.join("notes.txt"), body).unwrap();
+        let pool = Arc::new(ModelPool::new(None));
+        let live = LiveIndex::open(&root, ModelChoice::Code, pool).unwrap();
+        let snapshot = live.snapshot.read().unwrap().clone();
+        let chunks = crate::candidates(&root, None).unwrap();
+        assert_eq!(chunks.len(), snapshot.chunks.len());
+        for query in [
+            "useful value",
+            "alpha beta helper_17",
+            "notes txt filler",
+            "missing term words",
+        ] {
+            let mut terms = words(query);
+            terms.sort();
+            terms.dedup();
+            let expected = crate::bm25(&chunks, &terms, chunks.len());
+            let actual = snapshot.lexical.bm25(&terms);
+            assert_eq!(expected.len(), actual.len());
+            for (i, (want, got)) in expected.iter().zip(&actual).enumerate() {
+                assert_eq!(
+                    want.to_bits(),
+                    got.to_bits(),
+                    "query {query:?} chunk {i}: {want:?} != {got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_length_span_edit_matches_a_fresh_searcher() {
+        let (_dir, root) = fixture();
+        // A binary file sorts first and stays binary, so an edit to it is a
+        // zero-length chunk span at the same start as the next changed file.
+        std::fs::write(root.join("0.bin"), b"first\0payload").unwrap();
+        let pool = Arc::new(ModelPool::new(None));
+        let live = LiveIndex::open(&root, ModelChoice::Code, pool.clone()).unwrap();
+        std::fs::write(root.join("0.bin"), b"second\0payload").unwrap();
+        std::fs::write(root.join("a.rs"), "fn alpha() {\n    let changed_value = 9;\n}\n")
+            .unwrap();
+        let stats = live
+            .refresh(
+                &[root.join("0.bin"), root.join("a.rs")],
+                false,
+            )
+            .unwrap();
+        assert_eq!(stats.changed_files, 2);
+        equal_fresh(&root, &live, &pool);
+    }
+
+    #[test]
     fn incremental_updates_match_fresh_searcher_and_reuse_unchanged_vectors() {
         let (_dir, root) = fixture();
         let pool = Arc::new(ModelPool::new(None));
@@ -1320,10 +1918,10 @@ mod tests {
             .iter()
             .map(|chunk| {
                 (
-                    chunk.path.clone(),
+                    chunk.path.to_string(),
                     chunk.start,
                     chunk.end,
-                    chunk.content.clone(),
+                    chunk.content.to_string(),
                     chunk.counts.clone(),
                 )
             })

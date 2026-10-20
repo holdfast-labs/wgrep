@@ -36,15 +36,75 @@ use clap::{Parser, ValueEnum};
 use half::f16;
 use rayon::prelude::*;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// A path string shared by every chunk of one file. Serializes as a plain
+/// string, so the public JSON stays byte-identical to an owned `String`.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SharedStr(Arc<str>);
+
+impl SharedStr {
+    pub fn new(value: impl AsRef<str>) -> Self {
+        Self(Arc::from(value.as_ref()))
+    }
+}
+
+impl std::ops::Deref for SharedStr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for SharedStr {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SharedStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for SharedStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<String> for SharedStr {
+    fn from(value: String) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl From<&str> for SharedStr {
+    fn from(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl Serialize for SharedStr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedStr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Ok(Self(Arc::from(String::deserialize(deserializer)?)))
+    }
+}
 
 pub struct Model {
     pub repo: &'static str,
@@ -141,10 +201,10 @@ pub struct Args {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Chunk {
-    pub path: String,
+    pub path: SharedStr,
     pub start: usize,
     pub end: usize,
-    pub content: String,
+    pub content: Box<str>,
     #[serde(skip)]
     pub counts: HashMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,8 +315,8 @@ pub fn candidates(
         .par_iter()
         .map(|name| {
             let mut chunks = Vec::new();
-            let relative = name;
-            let relative = relative.strip_prefix(".").unwrap_or(relative);
+            let relative = name.strip_prefix(".").unwrap_or(name);
+            let shared_path = SharedStr::new(relative.to_string_lossy());
             let file = root.join(relative);
             let bytes = std::fs::read(&file)?;
             if let Some(expected) = expected {
@@ -275,7 +335,7 @@ pub fn candidates(
             let lines: Vec<&str> = source.split_inclusive('\n').collect();
             for (first, last) in splitter::ranges(&source, relative)? {
                 chunks.push(make_chunk(
-                    relative.to_string_lossy().into_owned(),
+                    shared_path.clone(),
                     first,
                     last,
                     lines[first - 1..last].concat(),
@@ -287,7 +347,13 @@ pub fn candidates(
     Ok(chunks?.into_iter().flatten().collect())
 }
 
-pub fn make_chunk(path: String, start: usize, end: usize, content: String) -> Chunk {
+pub fn make_chunk<P: Into<SharedStr>>(
+    path: P,
+    start: usize,
+    end: usize,
+    content: String,
+) -> Chunk {
+    let path = path.into();
     let mut counts = HashMap::new();
     for word in words(&content).into_iter().chain(words(&path)) {
         *counts.entry(word).or_insert(0) += 1;
@@ -296,7 +362,7 @@ pub fn make_chunk(path: String, start: usize, end: usize, content: String) -> Ch
         path,
         start,
         end,
-        content,
+        content: content.into(),
         counts,
         scores: None,
     }
