@@ -34,6 +34,43 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # wg discovers files with ripgrep, so the live-index tests need `rg` on
+      # PATH. Hosted runners do not ship it; use the release's pinned build.
+      - name: Install ripgrep 15.1.0 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RG_ASSET: ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz
+          RG_SHA256: 1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${RG_ASSET}" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/${RG_ASSET}"
+          echo "${RG_SHA256}  ${RUNNER_TEMP}/${RG_ASSET}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/rg"
+          tar --extract --gzip --file "${RUNNER_TEMP}/${RG_ASSET}" \
+            --directory "${RUNNER_TEMP}/rg" --strip-components=1
+          echo "${RUNNER_TEMP}/rg" >> "${GITHUB_PATH}"
+
+      - name: Install ripgrep 15.1.0 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RG_ASSET: ripgrep-15.1.0-x86_64-pc-windows-msvc.zip
+          RG_SHA256: 124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a
+        run: |
+          $ErrorActionPreference = "Stop"
+          $file = Join-Path $env:RUNNER_TEMP $env:RG_ASSET
+          Invoke-WebRequest -Uri "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/$env:RG_ASSET" -OutFile $file -UseBasicParsing
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          if ($actual -ne $env:RG_SHA256) { throw "ripgrep SHA-256 mismatch: got $actual" }
+          Expand-Archive -LiteralPath $file -DestinationPath "$env:RUNNER_TEMP\rg-unpack" -Force
+          $dir = (Get-ChildItem "$env:RUNNER_TEMP\rg-unpack" -Directory | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+      - name: Check ripgrep
+        run: rg --version
+
       - name: Run library and binary tests
         run: cargo test --locked --lib --bins
 

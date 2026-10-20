@@ -159,7 +159,11 @@ jobs:
           if ($actual -ne $env:RG_SHA256.ToLowerInvariant()) {
             throw "ripgrep SHA-256 mismatch: expected $env:RG_SHA256 got $actual"
           }
-          Expand-Archive -LiteralPath $file -DestinationPath "$env:RUNNER_TEMP\rg" -Force
+          Expand-Archive -LiteralPath $file -DestinationPath "$env:RUNNER_TEMP\rg-unpack" -Force
+          # The zip holds one ripgrep-<version>-<target>/ directory.
+          $inner = (Get-ChildItem "$env:RUNNER_TEMP\rg-unpack" -Directory | Select-Object -First 1).FullName
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\rg" | Out-Null
+          Copy-Item -LiteralPath (Join-Path $inner "rg.exe") -Destination "$env:RUNNER_TEMP\rg\rg.exe"
           & "$env:RUNNER_TEMP\rg\rg.exe" --version
 
       - name: Export source
