@@ -1,0 +1,17 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.0},
+  {"name": "pool400", "lex": 400, "sem": 400, "w": 0.25, "path": 0.0, "def": 0.0},
+  {"name": "pool600", "lex": 600, "sem": 600, "w": 0.25, "path": 0.0, "def": 0.0},
+  {"name": "w10", "lex": 200, "sem": 200, "w": 0.10, "path": 0.0, "def": 0.0},
+  {"name": "w15", "lex": 200, "sem": 200, "w": 0.15, "path": 0.0, "def": 0.0},
+  {"name": "w35", "lex": 200, "sem": 200, "w": 0.35, "path": 0.0, "def": 0.0},
+  {"name": "w50", "lex": 200, "sem": 200, "w": 0.50, "path": 0.0, "def": 0.0},
+  {"name": "path05", "lex": 200, "sem": 200, "w": 0.25, "path": 0.05, "def": 0.0},
+  {"name": "path10", "lex": 200, "sem": 200, "w": 0.25, "path": 0.10, "def": 0.0},
+  {"name": "path20", "lex": 200, "sem": 200, "w": 0.25, "path": 0.20, "def": 0.0},
+  {"name": "def05", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.05},
+  {"name": "def10", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.10},
+  {"name": "def20", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.20},
+  {"name": "pool400_w15", "lex": 400, "sem": 400, "w": 0.15, "path": 0.0, "def": 0.0},
+  {"name": "path10_def10", "lex": 200, "sem": 200, "w": 0.25, "path": 0.10, "def": 0.10}
+]

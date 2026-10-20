@@ -1,0 +1,8 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.0},
+  {"name": "def10", "lex": 200, "sem": 200, "w": 0.25, "path": 0.0, "def": 0.10},
+  {"name": "path20", "lex": 200, "sem": 200, "w": 0.25, "path": 0.20, "def": 0.0},
+  {"name": "pool400", "lex": 400, "sem": 400, "w": 0.25, "path": 0.0, "def": 0.0},
+  {"name": "w50", "lex": 200, "sem": 200, "w": 0.50, "path": 0.0, "def": 0.0},
+  {"name": "path10_def10", "lex": 200, "sem": 200, "w": 0.25, "path": 0.10, "def": 0.10}
+]
