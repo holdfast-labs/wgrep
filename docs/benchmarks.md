@@ -8,6 +8,24 @@ are not an apples-to-apples ratio.
 Setup and search latency are different measurements. Do not infer one from the
 other.
 
+## Comparison with sgrep (2026-10-20)
+
+`wg`'s semantic route is derived from sgrep revision `0fbe8e5`. This campaign
+compares the two on the same 13,332-file Rust `src` corpus, model and
+machine. Full method, raw-record paths and caveats are in
+[bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
+
+| Measure | wg | sgrep CLI | Result |
+| --- | ---: | ---: | --- |
+| One-file edit to first correct result, p50 | 0.22 s | 20.2 s | 91x faster. sgrep has no watcher and rebuilds its index. |
+| Warm semantic query, p50 | 147 ms | 495 ms | 3.4x faster. Top-10 rows and scores identical on 5/5 queries. |
+| 16 concurrent clients, throughput | 24.1 q/s | 6.2 q/s | 3.9x. 0 errors or timeouts on either side. |
+| Five attached repositories, RSS | 2.61 GiB | 1.19 GiB | wg uses about 2.2x the memory. |
+| Text search vs direct `rg 15.1`, p50 | 45.6 / 60.7 ms | 54.5 / 61.1 ms (rg) | No measurable overhead; same output lines. |
+
+One campaign on one 4 vCPU VPS. sgrep runs one process per query; wg answers
+through its resident daemon.
+
 ## Setup: Rust `src` corpus
 
 | Measure | Earlier isolated run | Final copied-corpus run |

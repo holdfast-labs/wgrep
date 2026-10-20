@@ -27,19 +27,19 @@ index for each attached repository and shares loaded models between them.
 
 ## Install
 
-Preview archives for Windows x64 and Linux x64 are built with the bundled
-ripgrep, source export, and provenance. They are not published yet. Build from
-a checkout:
+Linux x64 and Windows x64 are supported. macOS is not qualified yet.
+
+With Rust installed, build and install `wg` from source:
 
 ```sh
-cargo install --locked --path . --bin wg
+cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
 ```
 
-Run this from the repository root. It installs the `wg` binary into your Cargo
-binary directory.
+From a checkout, use `cargo install --locked --path . --bin wg`. Either command
+installs the `wg` binary into your Cargo binary directory.
 
-If you build a preview archive with `scripts/wg_release.py`, extract it and use
-the outer `wg`/`wg.cmd` launcher. The launcher finds the bundled `rg`; running
+Release archives (on the GitHub Releases page) bundle ripgrep, so they do not
+need `rg` on `PATH`. Extract one and use the outer `wg`/`wg.cmd` launcher. The launcher finds the bundled `rg`; running
 `bin/wg` directly still needs `rg` on `PATH` or `WG_RG`.
 
 ## Quick start
