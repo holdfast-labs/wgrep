@@ -60,7 +60,7 @@ jobs:
       - name: Build wg
         run: cargo build --locked --release --bin wg
 
-      - name: Download and verify ripgrep 15.1.0
+      - name: Download and verify ripgrep 15.1.0 (optional parity reference)
         env:
           RG_ASSET: ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz
           RG_SHA256: 1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
@@ -83,7 +83,6 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/out"
           python3 scripts/wg_release.py archive \
             --wg target/release/wg \
-            --rg "${RUNNER_TEMP}/rg/rg" \
             --platform linux-x64 \
             --export "${RUNNER_TEMP}/export" \
             --binary-status final \
@@ -112,7 +111,7 @@ jobs:
           set -euo pipefail
           python3 scripts/wg_release.py smoke \
             --wg "${WG_BUNDLE}/bin/wg" \
-            --rg "${WG_BUNDLE}/bin/rg" \
+            --rg "${RUNNER_TEMP}/rg/rg" \
             --work "${RUNNER_TEMP}/smoke" \
             --timeout 900
 
@@ -146,7 +145,7 @@ jobs:
       - name: Build wg
         run: cargo build --locked --release --bin wg
 
-      - name: Download and verify ripgrep 15.1.0
+      - name: Download and verify ripgrep 15.1.0 (optional parity reference)
         env:
           RG_ASSET: ripgrep-15.1.0-x86_64-pc-windows-msvc.zip
           RG_SHA256: 124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a
@@ -176,7 +175,6 @@ jobs:
           $version = $env:WG_TAG.TrimStart("v")
           python scripts/wg_release.py archive `
             --wg target/release/wg.exe `
-            --rg "$env:RUNNER_TEMP\rg\rg.exe" `
             --platform windows-x64 `
             --export "$env:RUNNER_TEMP\export" `
             --binary-status final `
@@ -210,7 +208,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           python scripts/wg_release.py smoke `
             --wg "$env:WG_BUNDLE\bin\wg.exe" `
-            --rg "$env:WG_BUNDLE\bin\rg.exe" `
+            --rg "$env:RUNNER_TEMP\rg\rg.exe" `
             --work "$env:RUNNER_TEMP\smoke" `
             --timeout 900
           if ($LASTEXITCODE -ne 0) { throw "smoke failed with exit code $LASTEXITCODE" }

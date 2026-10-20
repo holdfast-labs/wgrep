@@ -6,13 +6,14 @@ repository root from an explicit source export, with checksums, source
 identity, license/provenance copies, and a clean-install smoke test.
 
 This tool never commits, tags, uploads, or creates a release. It never builds
-Rust. Binaries are read-only inputs given explicitly with ``--wg`` and
-``--rg``. Model assets are downloaded at runtime by ``wg`` and are never
-bundled.
+Rust. The ``wg`` binary is a read-only input given explicitly with ``--wg``.
+ripgrep 15.1.0 is compiled into ``wg`` from ``crates/wisp-grep``; archives ship
+no external ``rg`` binary. Model assets are downloaded at runtime by ``wg`` and
+are never bundled.
 
 Subcommands:
-  export     select the root crate source into a clean export tree
-  archive    assemble a PREVIEW archive from an export and explicit binaries
+  export     select the root crate and wisp-grep source into a clean export tree
+  archive    assemble a PREVIEW archive from an export and an explicit binary
   smoke      run a tiny isolated-fixture smoke test against an installed wg
   self-test  exercise export/archive/smoke safety rules without a new binary
 """
@@ -56,6 +57,7 @@ EXPORT_PATHS = [
     "BASELINE_PROVENANCE.md",
     "src",
     "tests",
+    "crates/wisp-grep",
     "vendor/notify",
     "third_party",
     "docs",
@@ -568,24 +570,6 @@ def collect_dependency_licenses(lock_path: Path, registry_src, dest_dir: Path):
     return copied, len(unavailable)
 
 
-WINDOWS_LAUNCHER = (
-    "@echo off\r\n"
-    "setlocal\r\n"
-    "set \"WG_ROOT=%~dp0\"\r\n"
-    "set \"WG_RG=%WG_ROOT%bin\\rg.exe\"\r\n"
-    "set \"PATH=%WG_ROOT%bin;%PATH%\"\r\n"
-    "\"%WG_ROOT%bin\\wg.exe\" %*\r\n"
-    "exit /b %ERRORLEVEL%\r\n"
-)
-
-LINUX_LAUNCHER = (
-    "#!/bin/sh\n"
-    "case $0 in */*) base=${0%/*} ;; *) base=. ;; esac\n"
-    "here=$(CDPATH= cd -- \"$base\" && pwd)\n"
-    "WG_RG=\"$here/bin/rg\" PATH=\"$here/bin:$PATH\" exec \"$here/bin/wg\" \"$@\"\n"
-)
-
-
 def tree_add(tf, path: Path, arcname: str, mode=0o644):
     info = tf.gettarinfo(str(path), arcname=arcname)
     info.mode = mode
@@ -616,8 +600,8 @@ def _source_copy_ignore(export_dir: Path):
     return ignore
 
 
-def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
-                  build_id, binary_status, work: Path, cargo_registry=None,
+def stage_archive(binary_wg: Path, export, platform, version, build_id,
+                  binary_status, work: Path, cargo_registry=None,
                   label=LABEL):
     stage_root = Path(tempfile.mkdtemp(prefix="wg-stage-", dir=str(work)))
     root_name = f"wg-{version}-{platform}-{label}-{build_id}"
@@ -628,9 +612,7 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
     (root / "PROVENANCE").mkdir()
 
     wg_name = "wg.exe" if platform.startswith("windows") else "wg"
-    rg_name = "rg.exe" if platform.startswith("windows") else "rg"
     shutil.copyfile(binary_wg, root / "bin" / wg_name)
-    shutil.copyfile(binary_rg, root / "bin" / rg_name)
 
     core = export.out_dir
     # The README is written for a package root: it links `docs/...`. Keep it at
@@ -660,6 +642,10 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
             core / "third_party" / "ripgrep" / name,
             root / "licenses" / f"ripgrep-{name}",
         )
+        shutil.copyfile(
+            core / "crates" / "wisp-grep" / name,
+            root / "licenses" / f"wisp-grep-{name}",
+        )
 
     registry = resolve_registry(cargo_registry)
     copied, unavailable = collect_dependency_licenses(
@@ -674,17 +660,8 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
         export.notice_path, root / "PROVENANCE" / "EXPORT_NOTICE.txt"
     )
 
-    if platform.startswith("windows"):
-        (root / "wg.cmd").write_text(WINDOWS_LAUNCHER, encoding="utf-8", newline="")
-    else:
-        lp = root / "wg"
-        lp.write_text(LINUX_LAUNCHER, encoding="utf-8", newline="\n")
-        lp.chmod(0o755)
-
     wg_sha = sha256_file(binary_wg)
-    rg_sha = sha256_file(binary_rg)
     _, wg_vline, _ = binary_version(binary_wg)
-    rg_code, rg_vline, _ = binary_version(binary_rg)
 
     build_info = {
         "label": label,
@@ -715,22 +692,26 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
                 "format": detect_format(binary_wg),
                 "version_line": wg_vline,
             },
-            "rg": {
-                "path": f"bin/{rg_name}",
-                "sha256": rg_sha,
-                "format": detect_format(binary_rg),
-                "version_line": (rg_vline or "").splitlines()[0] if rg_vline else "",
-            },
         },
         "dependency_licenses": {
             "registry_src": str(registry) if registry else None,
             "packages_copied": copied,
             "packages_unavailable": unavailable,
         },
-        "rg_discovery": (
-            "The bundled launcher sets WG_RG to bin/rg and prepends bin to PATH. "
-            "Running bin/wg directly still requires rg on PATH or WG_RG set."
-        ),
+        "text_engine": {
+            "entrypoint": f"bin/{wg_name}",
+            "implementation": "ripgrep 15.1.0 compiled into wg (crates/wisp-grep)",
+            "external_rg_required": False,
+            "wg_rg_env_read": False,
+        },
+        "licenses": {
+            "ripgrep": [
+                f"licenses/ripgrep-{name}" for name in THIRD_PARTY_LICENSES
+            ],
+            "wisp-grep": [
+                f"licenses/wisp-grep-{name}" for name in THIRD_PARTY_LICENSES
+            ],
+        },
     }
     (root / "PROVENANCE" / "BUILD_INFO.json").write_text(
         json.dumps(build_info, indent=2, sort_keys=True) + "\n",
@@ -763,9 +744,7 @@ def pack_archive(root: Path, root_name: str, out_file: Path, platform: str):
                 if not path.is_file():
                     continue
                 arc = f"{root_name}/" + rel_norm(path.relative_to(root))
-                executable = path.parent.name == "bin" or (
-                    path.parent == root and path.name == "wg"
-                )
+                executable = path.parent.name == "bin"
                 mode = 0o755 if executable else 0o644
                 tree_add(tf, path, arc, mode)
 
@@ -794,15 +773,11 @@ def cmd_archive(args):
     work = Path(args.work).resolve()
     work.mkdir(parents=True, exist_ok=True)
     binary_wg = Path(args.wg)
-    binary_rg = Path(args.rg)
     if not binary_wg.is_file():
         raise ReleaseError(f"--wg not found: {binary_wg}")
-    if not binary_rg.is_file():
-        raise ReleaseError(f"--rg not found: {binary_rg}")
 
     platform = args.platform
     wg_platform = platform_of(binary_wg)
-    rg_platform = platform_of(binary_rg)
     if platform == "auto":
         platform = wg_platform
     if platform == "unknown":
@@ -813,16 +788,6 @@ def cmd_archive(args):
         raise ReleaseError(
             f"--wg format {wg_platform} does not match platform label {platform}"
         )
-    if rg_platform != platform:
-        raise ReleaseError(
-            f"--rg format {rg_platform} does not match platform label {platform}"
-        )
-    rg_code, rg_vline, _ = binary_version(binary_rg)
-    if not getattr(args, "allow_fixture_binaries", False):
-        if not (rg_vline or "").startswith("ripgrep 15.1"):
-            raise ReleaseError(
-                f"--rg is not ripgrep 15.1 (got: {rg_vline or 'unreadable'})"
-            )
 
     if args.export:
         export = dataclasses.replace(_load_export(Path(args.export)), out_dir=Path(args.export).resolve())
@@ -845,7 +810,7 @@ def cmd_archive(args):
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
     stage_root, root_name, build_info = stage_archive(
-        binary_wg, binary_rg, export, platform, version, build_id,
+        binary_wg, export, platform, version, build_id,
         args.binary_status, work, args.cargo_registry, label=label,
     )
     try:
@@ -923,8 +888,15 @@ def cmd_smoke(args):
     if not wg.is_file():
         raise ReleaseError(f"--wg not found: {wg}")
     rg = Path(args.rg).resolve() if args.rg else None
-    if rg is not None and not rg.is_file():
-        raise ReleaseError(f"--rg not found: {rg}")
+    if rg is not None:
+        if not rg.is_file():
+            raise ReleaseError(f"--rg not found: {rg}")
+        rg_code, rg_vline, _ = binary_version(rg)
+        if rg_code != 0 or not rg_vline.startswith("ripgrep 15.1"):
+            raise ReleaseError(
+                f"--rg parity reference is not ripgrep 15.1 "
+                f"(got: {rg_vline or 'unreadable'})"
+            )
 
     work = Path(args.work).resolve()
     if work.exists() and any(work.iterdir()):
@@ -975,11 +947,9 @@ def cmd_smoke(args):
         cache_args = ["--cache-dir", str(warm)]
         if not (warm / "tree-sitter-language-pack").is_dir():
             raise ReleaseError("--warm-cache lacks a tree-sitter-language-pack cache")
-    if rg is not None:
-        env["WG_RG"] = str(rg)
+    # The archive must work with no rg anywhere on PATH and no WG_RG. The
+    # optional parity reference is invoked by absolute path only.
     env["PATH"], dropped = sanitized_path_without_rg(env.get("PATH", ""))
-    if rg is not None:
-        env["PATH"] = str(rg.resolve().parent) + os.pathsep + env["PATH"]
 
     steps = []
 
@@ -1017,6 +987,8 @@ def cmd_smoke(args):
             calls = [
                 ("status --json", ["status", "--json"], {0}),
                 ("text query -F", ["-F", "needle", "."], {0}),
+                ("text query -n -F", ["-n", "-F", "needle", "."], {0}),
+                ("text files -l", ["-l", "needle", "."], {0}),
                 ("text no-match exit", ["-F", "WgNoMatchSentinelC903x", "."], {1}),
                 ("text error exit", ["-e", "(", "."], {2}),
                 ("semantic query", ["needle", "--json", "--top", "2"], {0}),
@@ -1042,8 +1014,46 @@ def cmd_smoke(args):
                         steps[-1]["ok"] = False
                 elif name == "text query -F" and code == 0:
                     steps[-1]["ok"] = b"needle" in out and b"DO_NOT_SHOW" not in out
+                elif name == "text query -n -F" and code == 0:
+                    steps[-1]["ok"] = (b"needle" in out and b":1:" in out
+                                       and b"DO_NOT_SHOW" not in out)
+                elif name == "text files -l" and code == 0:
+                    steps[-1]["ok"] = (b"a.rs" in out and b"c.rs" in out
+                                       and b"hidden.rs" not in out)
                 elif name == "files" and code == 0:
                     steps[-1]["ok"] = b"a.rs" in out and b"c.rs" in out and b"hidden.rs" not in out
+
+            if rg is not None:
+                # Optional parity: rg is a reference only. It never enters PATH
+                # and its directory is stripped if the host PATH contains it.
+                for name, tail in (
+                    ("parity -n -F", ["-n", "-F", "needle", "."]),
+                    ("parity -l", ["-l", "needle", "."]),
+                    ("parity --files", ["--files"]),
+                ):
+                    wg_argv = [str(wg), *cache_args, *tail]
+                    rg_argv = [str(rg), *tail]
+                    wcode, wout, werr = run_capture(
+                        wg_argv, cwd=fixture, env=env, timeout=args.timeout
+                    )
+                    rcode, rout, rerr = run_capture(
+                        rg_argv, cwd=fixture, env=env, timeout=args.timeout
+                    )
+                    wg_lines = sorted(wout.splitlines())
+                    rg_lines = sorted(rout.splitlines())
+                    steps.append({
+                        "name": name,
+                        "argv": wg_argv,
+                        "reference_argv": rg_argv,
+                        "exit": wcode,
+                        "reference_exit": rcode,
+                        "expect": [0],
+                        "parity": "sorted-stdout",
+                        "ok": (wcode == 0 and rcode == 0 and wg_lines == rg_lines),
+                        "stdout_head": wout[:400].decode("utf-8", "replace"),
+                        "reference_stdout_head": rout[:400].decode("utf-8", "replace"),
+                        "stderr_head": werr[:400].decode("utf-8", "replace"),
+                    })
     finally:
         if (service / "service.json").exists() or up_ok:
             down_argv = [str(wg), *cache_args, "down"]
@@ -1061,7 +1071,7 @@ def cmd_smoke(args):
     summary = {
         "ok": overall,
         "wg": str(wg),
-        "rg": str(rg) if rg else None,
+        "rg_parity": str(rg) if rg else None,
         "warm_cache": str(args.warm_cache) if args.warm_cache else None,
         "isolated_dirs": {
             "fixture": str(fixture), "service": str(service),
@@ -1070,9 +1080,10 @@ def cmd_smoke(args):
         "path_dirs_dropped_for_rg": dropped,
         "steps": steps,
         "note": (
-            "Smoke tests the installed wg with system rg removed from PATH and "
-            "isolated caches. No result is reported as a pass unless every step "
-            "really ran."
+            "Smoke tests the installed wg with every rg-containing PATH entry "
+            "removed, WG_RG unset, and isolated caches. When --rg is given, it "
+            "is only an out-of-PATH ripgrep 15.1 parity reference. No result is "
+            "reported as a pass unless every step really ran."
         ),
     }
     if args.json:
@@ -1161,6 +1172,21 @@ def make_mini_repo(base: Path, symlink=False, sensitive=False):
     (ripgrep / "LICENSE-MIT").write_text("MIT test\n", encoding="utf-8")
     (ripgrep / "UNLICENSE").write_text("unlicense test\n", encoding="utf-8")
     (ripgrep / "COPYING").write_text("copying test\n", encoding="utf-8")
+    wisp = base / "crates" / "wisp-grep"
+    (wisp / "src").mkdir(parents=True)
+    (wisp / "target").mkdir()
+    (wisp / "Cargo.toml").write_text(
+        '[package]\nname = "wisp-grep"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (wisp / "Cargo.lock").write_text(
+        '[[package]]\nname = "wisp-grep"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (wisp / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (wisp / "src" / "lib.rs").write_text("pub fn rg() {}\n", encoding="utf-8")
+    (wisp / "LICENSE-MIT").write_text("MIT test\n", encoding="utf-8")
+    (wisp / "UNLICENSE").write_text("unlicense test\n", encoding="utf-8")
+    (wisp / "COPYING").write_text("copying test\n", encoding="utf-8")
+    (wisp / "target" / "junk").write_bytes(b"x")
     if symlink:
         (base / "src" / "link.rs").symlink_to(base / "src" / "lib.rs")
     if sensitive:
@@ -1203,7 +1229,11 @@ def run_self_test(args):
         assert (out / "tests" / "smoke.rs").is_file(), "tests missing"
         assert (out / "vendor" / "notify" / "src" / "lib.rs").is_file(), "notify missing"
         assert (out / "third_party" / "ripgrep" / "COPYING").is_file(), "third_party missing"
+        assert (out / "crates" / "wisp-grep" / "Cargo.toml").is_file(), "wisp-grep Cargo.toml missing"
+        assert (out / "crates" / "wisp-grep" / "src" / "lib.rs").is_file(), "wisp-grep source missing"
+        assert (out / "crates" / "wisp-grep" / "COPYING").is_file(), "wisp-grep license missing"
         assert not (out / "target").exists(), "target not excluded"
+        assert not (out / "crates" / "wisp-grep" / "target").exists(), "nested target not excluded"
         assert not (out / "__pycache__").exists(), "__pycache__ not excluded"
         assert not (out / "docs" / "launch").exists(), "docs/launch not excluded"
         assert res.file_count > 0
@@ -1318,29 +1348,40 @@ def run_self_test(args):
         repo = make_mini_repo(sandbox / "r7")
         export = export_tree(repo, sandbox / "o7")
         wg = fake_binary(sandbox / "wg-pe", "PE")
-        rg = fake_binary(sandbox / "rg-pe", "PE")
         out = sandbox / "a7.zip"
         ns = argparse.Namespace(
-            work=str(sandbox / "aw"), wg=str(wg), rg=str(rg), platform="auto",
+            work=str(sandbox / "aw"), wg=str(wg), platform="auto",
             export=str(export.out_dir), repo=str(repo), version="9.9.9",
             build_id="test7", out=str(out), force=True,
-            binary_status="self-test-fixture", cargo_registry=None,
-            allow_fixture_binaries=True, json=False,
+            binary_status="self-test-fixture", cargo_registry=None, json=False,
         )
         cmd_archive(ns)
         with zipfile.ZipFile(out) as zf:
             names = set(zf.namelist())
             root = f"wg-9.9.9-windows-x64-{LABEL}-test7"
             for required in (
-                f"{root}/bin/wg.exe", f"{root}/bin/rg.exe", f"{root}/wg.cmd",
+                f"{root}/bin/wg.exe",
                 f"{root}/README.md", f"{root}/docs/agent-guide.md",
                 f"{root}/docs/benchmarks.md", f"{root}/licenses/sgrep-LICENSE",
                 f"{root}/licenses/ripgrep-LICENSE-MIT",
+                f"{root}/licenses/ripgrep-UNLICENSE",
+                f"{root}/licenses/ripgrep-COPYING",
+                f"{root}/licenses/wisp-grep-LICENSE-MIT",
+                f"{root}/licenses/wisp-grep-UNLICENSE",
+                f"{root}/licenses/wisp-grep-COPYING",
+                f"{root}/source/crates/wisp-grep/Cargo.toml",
+                f"{root}/source/crates/wisp-grep/src/lib.rs",
                 f"{root}/PROVENANCE/BUILD_INFO.json",
                 f"{root}/PROVENANCE/SOURCE_MANIFEST.sha256",
                 f"{root}/PROVENANCE/SHA256SUMS",
             ):
                 assert required in names, f"missing archive path {required}"
+            for banned in (
+                f"{root}/bin/rg.exe", f"{root}/bin/rg",
+                f"{root}/wg.cmd", f"{root}/wg",
+            ):
+                assert banned not in names, f"unexpected archive path {banned}"
+            assert not any("/bin/rg" in name for name in names), "rg binary present"
             sums = zf.read(f"{root}/PROVENANCE/SHA256SUMS").decode()
             for line in sums.splitlines():
                 digest, _, arc = line.partition("  ")
@@ -1348,15 +1389,17 @@ def run_self_test(args):
             info = json.loads(zf.read(f"{root}/PROVENANCE/BUILD_INFO.json"))
             assert info["label"] == LABEL and info["not_official_release"] is True
             assert info["binary_status"] == "self-test-fixture"
+            assert list(info["binaries"]) == ["wg"], "archive must ship only wg"
+            assert info["text_engine"]["external_rg_required"] is False
+            assert info["text_engine"]["wg_rg_env_read"] is False
         return ("PASS", f"{len(names)} archive entries verified")
 
     def case_magic_mismatch():
         repo = make_mini_repo(sandbox / "r8")
         export = export_tree(repo, sandbox / "o8")
         wg = fake_binary(sandbox / "wg-elf", "ELF")
-        rg = fake_binary(sandbox / "rg-elf", "ELF")
         ns = argparse.Namespace(
-            work=str(sandbox / "aw8"), wg=str(wg), rg=str(rg),
+            work=str(sandbox / "aw8"), wg=str(wg),
             platform="windows-x64", export=str(export.out_dir), repo=str(repo),
             version="9.9.9", build_id="test8", out=str(sandbox / "a8.zip"),
             force=True, binary_status="x", cargo_registry=None, json=False,
@@ -1367,30 +1410,28 @@ def run_self_test(args):
             return ("PASS", f"refused OS/label mismatch: {exc}")
         return ("FAIL", "OS/label mismatch was not refused")
 
-    def case_rg_version():
-        repo = make_mini_repo(sandbox / "r9")
-        export = export_tree(repo, sandbox / "o9")
-        wg = fake_binary(sandbox / "wg-pe2", "PE")
-        rg = fake_binary(sandbox / "rg-pe2", "PE")
-        ns = argparse.Namespace(
-            work=str(sandbox / "aw9"), wg=str(wg), rg=str(rg), platform="auto",
-            export=str(export.out_dir), repo=str(repo), version="9.9.9",
-            build_id="test9", out=str(sandbox / "a9.zip"), force=True,
-            binary_status="x", cargo_registry=None, json=False,
-        )
+    def case_archive_rejects_rg():
+        parser = build_parser()
+        saved = sys.stderr
+        sys.stderr = open(os.devnull, "w")
         try:
-            cmd_archive(ns)
-        except ReleaseError as exc:
-            return ("PASS", f"refused non-rg15.1 input: {exc}")
-        return ("FAIL", "a non-ripgrep input was accepted as --rg")
+            try:
+                parser.parse_args(["archive", "--wg", "x", "--rg", "y"])
+            except SystemExit as exc:
+                if exc.code != 0:
+                    return ("PASS", "archive no longer accepts --rg")
+                return ("FAIL", "archive parser exited zero for --rg")
+        finally:
+            sys.stderr.close()
+            sys.stderr = saved
+        return ("FAIL", "archive accepted the removed --rg option")
 
     def case_missing_binary():
         repo = make_mini_repo(sandbox / "r10")
         export = export_tree(repo, sandbox / "o10")
         wg = sandbox / "does-not-exist"
-        rg = fake_binary(sandbox / "rg-pe3", "PE")
         ns = argparse.Namespace(
-            work=str(sandbox / "aw10"), wg=str(wg), rg=str(rg), platform="auto",
+            work=str(sandbox / "aw10"), wg=str(wg), platform="auto",
             export=str(export.out_dir), repo=str(repo), version="9.9.9",
             build_id="test10", out=str(sandbox / "a10.zip"), force=True,
             binary_status="x", cargo_registry=None, json=False,
@@ -1402,21 +1443,19 @@ def run_self_test(args):
         return ("FAIL", "missing --wg was not refused")
 
     def case_archive_overwrite():
+        repo = make_mini_repo(sandbox / "r-overwrite")
+        export = export_tree(repo, sandbox / "o-overwrite")
+        wg = fake_binary(sandbox / "wg-pe-overwrite", "PE")
         rep = sandbox / "existing.zip"
         rep.write_text("data\n", encoding="utf-8")
         args2 = argparse.Namespace(
-            work=str(sandbox / "aw11"), wg="x", rg="y", platform="auto",
-            export=None, repo=str(sandbox), version="9.9.9", build_id="t",
-            out=str(rep), force=False, binary_status="x", cargo_registry=None, json=False,
+            work=str(sandbox / "aw11"), wg=str(wg), platform="auto",
+            export=str(export.out_dir), repo=str(repo), version="9.9.9",
+            build_id="t", out=str(rep), force=False, binary_status="x",
+            cargo_registry=None, json=False,
         )
         try:
-            saved = sys.stdout
-            sys.stdout = open(os.devnull, "w")
-            try:
-                cmd_archive(args2)
-            finally:
-                sys.stdout.close()
-                sys.stdout = saved
+            cmd_archive(args2)
         except ReleaseError:
             return ("PASS", "existing output refused before pack")
         return ("FAIL", "existing output archive was not refused")
@@ -1432,6 +1471,20 @@ def run_self_test(args):
             return ("PASS", f"smoke refused missing binary: {exc}")
         return ("FAIL", "smoke with a missing binary did not fail")
 
+    def case_smoke_path_sanitizer():
+        rg_dir = sandbox / "path-with-rg"
+        clean_dir = sandbox / "path-clean"
+        rg_dir.mkdir()
+        clean_dir.mkdir()
+        (rg_dir / "rg.exe").write_bytes(b"")
+        (rg_dir / "rg").write_bytes(b"")
+        kept, dropped = sanitized_path_without_rg(
+            os.pathsep.join([str(rg_dir), str(clean_dir)])
+        )
+        assert dropped == [str(rg_dir)], f"rg dir was not dropped: {dropped}"
+        assert kept == str(clean_dir), f"clean dir was not kept: {kept}"
+        return ("PASS", "rg-containing PATH entries removed")
+
     checks = [
         ("export excludes target/__pycache__", case_export_excludes),
         ("manifest hashes every selected file", case_manifest),
@@ -1443,12 +1496,13 @@ def run_self_test(args):
         ("export excludes runtime roots but retains nested source", case_runtime_roots),
         ("forced export refuses unowned output", case_force_unowned),
         ("export refuses non-empty output dir", case_nonempty),
-        ("archive content paths and SHA256SUMS", case_archive_paths),
+        ("archive ships only wg plus source and notices", case_archive_paths),
         ("archive refuses OS/label mismatch", case_magic_mismatch),
-        ("archive requires ripgrep 15.1 input", case_rg_version),
+        ("archive rejects removed --rg option", case_archive_rejects_rg),
         ("archive fails on missing --wg", case_missing_binary),
         ("archive refuses existing output file", case_archive_overwrite),
         ("smoke fails on missing --wg", case_smoke_missing),
+        ("smoke removes rg from PATH", case_smoke_path_sanitizer),
     ]
     for name, fn in checks:
         st.check(name, fn)
@@ -1463,7 +1517,7 @@ def build_parser():
     p = argparse.ArgumentParser(prog="wg_release.py", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
 
-    ep = sub.add_parser("export", help="export root crate + vendored notify source")
+    ep = sub.add_parser("export", help="export root crate + wisp-grep + vendored notify source")
     ep.add_argument("--repo", default=str(REPO_ROOT))
     ep.add_argument("--out", required=True)
     ep.add_argument("--force", action="store_true")
@@ -1472,7 +1526,6 @@ def build_parser():
 
     ap = sub.add_parser("archive", help="assemble a PREVIEW archive")
     ap.add_argument("--wg", required=True)
-    ap.add_argument("--rg", required=True)
     ap.add_argument("--platform", default="auto",
                     choices=["auto", "windows-x64", "windows-arm64",
                              "linux-x64", "linux-arm64"])
@@ -1492,7 +1545,8 @@ def build_parser():
 
     sp = sub.add_parser("smoke", help="clean-install smoke test")
     sp.add_argument("--wg", required=True)
-    sp.add_argument("--rg", default=None)
+    sp.add_argument("--rg", default=None,
+                    help="optional ripgrep 15.1 parity reference (not bundled, not on PATH)")
     sp.add_argument("--warm-cache", default=None)
     sp.add_argument("--work", default=str(DEFAULT_WORK / "smoke"))
     sp.add_argument("--timeout", type=int, default=600)
