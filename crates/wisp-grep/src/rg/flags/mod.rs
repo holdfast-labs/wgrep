@@ -36,7 +36,7 @@ pub(crate) use crate::flags::{
     },
     hiargs::HiArgs,
     lowargs::{GenerateMode, Mode, SearchMode, SpecialMode},
-    parse::{ParseResult, parse, parse_args},
+    parse::{ParseResult, parse, parse_args, parse_args_at, parse_from},
 };
 
 mod complete;

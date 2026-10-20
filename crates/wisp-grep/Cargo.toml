@@ -1,5 +1,5 @@
 [package]
-name = "wgrep"
+name = "wisp-grep"
 version = "0.1.0"
 edition = "2024"
 license = "Unlicense OR MIT"
@@ -7,6 +7,10 @@ repository = "https://github.com/abhimanilal/wispd"
 rust-version = "1.95"
 description = "wgrep: ripgrep 15.1.0 with a compact trigram index that skips files proven not to match."
 build = "build.rs"
+
+[lib]
+name = "wisp_grep"
+path = "src/lib.rs"
 
 [[bin]]
 name = "wgrep"
@@ -28,7 +32,10 @@ grep = "=0.4.1"
 ignore = "=0.4.24"
 lexopt = "=0.3.1"
 log = "=0.4.28"
-serde_json = "=1.0.145"
+# rg 15.1.0 pins 1.0.145. The root crate's tree-sitter 0.27 requires
+# >=1.0.150, so 1.0.151 is the single version both trees can use. Parity is
+# re-proved against rg 15.1.0; see .notes/WG_PHASE_A_HANDOFF.md.
+serde_json = "=1.0.151"
 termcolor = "=1.4.1"
 textwrap = { version = "=0.16.2", default-features = false }
 regex-syntax = "=0.8.8"

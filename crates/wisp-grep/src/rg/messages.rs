@@ -137,3 +137,8 @@ pub(crate) fn errored() -> bool {
 pub(crate) fn set_errored() {
     ERRORED.store(true, Ordering::Relaxed);
 }
+
+/// Clear the error flag before a new in-process invocation.
+pub(crate) fn reset_errored() {
+    ERRORED.store(false, Ordering::Relaxed);
+}

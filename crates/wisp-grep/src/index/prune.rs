@@ -56,7 +56,7 @@ impl Pruner {
     /// Returns `None` when the index cannot help: disabled, no index covers
     /// the search paths, or the patterns rule out no file.
     pub(crate) fn new(patterns: &[String], opts: &PlanOptions, paths: &[PathBuf], cwd: &Path) -> Option<Pruner> {
-        if std::env::var_os("WGREP_NO_INDEX").is_some() {
+        if super::events::walk_only() || std::env::var_os("WGREP_NO_INDEX").is_some() {
             return None;
         }
         let debug = std::env::var_os("WGREP_INDEX_DEBUG").is_some();

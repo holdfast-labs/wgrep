@@ -6,21 +6,19 @@ search engines:
 - **Semantic ranking (the default).** `wg QUERY [ROOT]` ranks source chunks with
   the sgrep-derived hybrid scorer. It finds code by meaning as well as by name.
 - **Filesystem text and regex search.** A familiar ripgrep flag such as `-F`,
-  `-e`, `-n`, `-l`, `-g` or `--files` selects exact ripgrep behavior.
+  `-e`, `-n`, `-l`, `-g` or `--files` selects exact ripgrep behavior. ripgrep
+  15.1.0 is built into `wg`; you do not need `rg` installed.
 
-Both routes go through one shared background daemon. The daemon keeps a live
-index for each attached repository and shares loaded models between them.
+Semantic search runs through one shared background daemon. The daemon keeps a
+live index for each attached repository and shares loaded models between them.
 
 ![wg quickstart](docs/media/wg-quickstart.gif)
 
-*Ask in plain English, or use a ripgrep flag. Both routes use one daemon.*
+*Ask in plain English, or use a ripgrep flag.*
 
 ## Requirements
 
-- Rust 1.90 or newer. The crate uses edition 2024.
-- `rg` (ripgrep) on `PATH`. `wg` uses it to select searchable files and to run
-  filesystem searches. `WG_RG` can select a specific text-search backend;
-  semantic file discovery still requires `rg` on `PATH`.
+- Rust 1.95 or newer to build. The crate uses edition 2024.
 - A network connection on the first run. `wg` downloads the pinned embedding
   model assets (about 33.5 MB in the recorded run) and any needed language
   parser assets. Later runs use the local cache.
@@ -38,9 +36,8 @@ cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
 From a checkout, use `cargo install --locked --path . --bin wg`. Either command
 installs the `wg` binary into your Cargo binary directory.
 
-Release archives (on the GitHub Releases page) bundle ripgrep, so they do not
-need `rg` on `PATH`. Extract one and use the outer `wg`/`wg.cmd` launcher. The launcher finds the bundled `rg`; running
-`bin/wg` directly still needs `rg` on `PATH` or `WG_RG`.
+Release archives are on the GitHub Releases page. `wg` is a single binary;
+it does not need `rg` on `PATH`.
 
 ## Quick start
 
@@ -86,26 +83,14 @@ wg --files                               # list searchable files
 wg --json -F "needle" .                  # ripgrep JSON events
 ```
 
-The daemon runs a real, authoritative `rg` child for these requests. It
-preserves your arguments, working directory, stdout bytes, stderr bytes, and
-exit status. So ignore rules, binary handling, encodings, and diagnostics are
-ripgrep's own. This route reads the filesystem; the shared semantic index does
-not accelerate regex scans.
+`wg` runs these requests with its built-in copy of ripgrep 15.1.0, in the `wg`
+process itself, in your working directory. Output bytes, stderr, exit status,
+ignore rules, binary handling, encodings and `RIPGREP_CONFIG_PATH` behave as
+they do with `rg` 15.1.0; the differential test suite compares `wg` with a
+real `rg` 15.1.0 binary. This route does not need `wg up` or the daemon.
 
 You can pipe input the same way as ripgrep, for example
 `cat file.txt | wg -F needle -`.
-
-The preview buffers pipe input before forwarding it. Limits are 8 MiB of
-stdin, 8 MiB of stdout, and 1 MiB of stderr per text request. The direct rg child
-has a 60-second default time bound. Exceeding a bound returns an error, not a
-partial successful result. Live/unbounded streams and external preprocessing
-helpers are not qualified in this preview.
-
-Command arguments and the caller's working-directory path must be UTF-8.
-File content and captured output can contain arbitrary bytes. Explicit rg
-formatting flags are forwarded; automatic color/headings reflect the child's
-captured streams. The child inherits the daemon's environment. Restart the
-daemon after changing rg-related environment variables.
 
 ## A second repository
 

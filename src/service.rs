@@ -1,9 +1,7 @@
 //! One authenticated, multi-root semantic service for the `wg` front door.
 //! The daemon owns one shared model pool; each root has one live index.
-use base64::{Engine, engine::general_purpose::STANDARD};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use wgrep::lexical;
 use wgrep::live::{LiveIndex, ModelPool};
 use wgrep::{ModelChoice, Result};
 use std::collections::HashMap;
@@ -53,8 +51,6 @@ struct Service {
     token: String,
     started: Instant,
     shutdown: AtomicBool,
-    /// In-flight lexical (rg child) requests, for the explicit admission bound.
-    lexical_active: AtomicUsize,
 }
 
 fn cache_root() -> PathBuf {
@@ -288,23 +284,6 @@ fn request(v: serde_json::Value) -> Result<serde_json::Value> {
             .into());
     }
     Ok(r)
-}
-
-/// RAII admission slot for one lexical child; releases on drop.
-struct LexAdmission<'a>(&'a AtomicUsize);
-
-impl Drop for LexAdmission<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-fn admit_lexical(service: &Service) -> Result<LexAdmission<'_>> {
-    if service.lexical_active.fetch_add(1, Ordering::AcqRel) >= lexical::MAX_CONCURRENT {
-        service.lexical_active.fetch_sub(1, Ordering::AcqRel);
-        return Err("lexical search admission limit reached; retry shortly".into());
-    }
-    Ok(LexAdmission(&service.lexical_active))
 }
 
 fn status(service: &Service) -> serde_json::Value {
@@ -742,37 +721,6 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 }
             }
         }
-        "lexical" => {
-            let raw = req["args"].as_array().ok_or("lexical args required")?;
-            let mut args = Vec::with_capacity(raw.len());
-            for value in raw {
-                args.push(
-                    value
-                        .as_str()
-                        .ok_or("lexical args must be strings")?
-                        .to_owned(),
-                );
-            }
-            if args.is_empty() {
-                return Err("lexical args required".into());
-            }
-            let cwd = PathBuf::from(req["cwd"].as_str().ok_or("lexical cwd required")?);
-            if !cwd.is_dir() {
-                return Err(format!("search directory does not exist: {}", cwd.display()).into());
-            }
-            let stdin = match req["stdin"].as_str() {
-                Some(encoded) => Some(STANDARD.decode(encoded)?),
-                _ => None,
-            };
-            let _admission = admit_lexical(service)?;
-            let out = lexical::run(&args, &cwd, stdin.as_deref(), lexical::timeout())?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "exit_code": out.exit_code,
-                "stdout": STANDARD.encode(&out.stdout),
-                "stderr": STANDARD.encode(&out.stderr),
-            }))
-        }
         _ => Err("unknown service operation".into()),
     })();
     result.unwrap_or_else(|e| serde_json::json!({"ok":false,"error":format!("{e:#}")}))
@@ -800,7 +748,6 @@ pub fn daemon(cache: Option<PathBuf>) -> Result<()> {
         token: token.clone(),
         started: Instant::now(),
         shutdown: AtomicBool::new(false),
-        lexical_active: AtomicUsize::new(0),
     });
     let (tx, rx) = mpsc::sync_channel::<TcpStream>(CONNS);
     let rx = Arc::new(Mutex::new(rx));
@@ -843,8 +790,8 @@ pub fn daemon(cache: Option<PathBuf>) -> Result<()> {
 }
 
 /// Start the shared service if it is not already answering, then return.
-/// Used by both `wg up` and the lexical route so every request reaches the
-/// same process (one daemon, never a per-root or per-query daemon).
+/// Used by `wg up` so every semantic request reaches the same process
+/// (one daemon, never a per-root or per-query daemon).
 pub fn ensure_running(cache: Option<PathBuf>) -> Result<()> {
     if request(serde_json::json!({"op":"ping"})).is_ok() {
         return Ok(());
@@ -1012,21 +959,6 @@ pub fn query(
     )
 }
 
-/// Run a bounded, authoritative `rg` child inside the shared service.
-pub fn lexical(
-    args: &[String],
-    cwd: &Path,
-    stdin: Option<&[u8]>,
-    cache: Option<PathBuf>,
-) -> Result<serde_json::Value> {
-    ensure_running(cache)?;
-    request(serde_json::json!({
-        "op": "lexical",
-        "args": args,
-        "cwd": cwd.to_string_lossy(),
-        "stdin": stdin.map(|bytes| STANDARD.encode(bytes)),
-    }))
-}
 pub fn status_json() -> Result<serde_json::Value> {
     request(serde_json::json!({"op":"status"}))
 }
@@ -1082,7 +1014,6 @@ mod tests {
             token: "t".into(),
             started: Instant::now(),
             shutdown: AtomicBool::new(false),
-            lexical_active: AtomicUsize::new(0),
         }
     }
     #[test]
@@ -1173,7 +1104,6 @@ mod tests {
             token: "t".into(),
             started: Instant::now(),
             shutdown: AtomicBool::new(false),
-            lexical_active: AtomicUsize::new(0),
         });
         let r = process(
             &svc,
@@ -1192,7 +1122,6 @@ mod tests {
             token: "t".into(),
             started: Instant::now(),
             shutdown: AtomicBool::new(false),
-            lexical_active: AtomicUsize::new(0),
         };
         let s = status(&svc);
         assert!(s["pid"].is_number());

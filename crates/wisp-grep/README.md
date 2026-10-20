@@ -14,8 +14,13 @@ or daemon, `wgrep` is `rg`.
 ## Install
 
 ```sh
-cargo install wgrep            # or: cargo install --path crates/wisp-grep
+cargo install --path crates/wisp-grep
 ```
+
+The crate also exposes a library target (`wisp_grep`) that runs the same
+vendored ripgrep in-process. `run_rg(argv)` behaves like the `wgrep` binary in
+one-shot mode, and `list_files(cwd, path)` uses the same walker for file
+discovery. Neither function runs an external `rg`.
 
 Then, once per repository:
 

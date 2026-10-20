@@ -2,7 +2,7 @@
 Parses command line arguments into a structured and typed representation.
 */
 
-use std::{borrow::Cow, collections::BTreeSet, ffi::OsString};
+use std::{borrow::Cow, collections::BTreeSet, ffi::OsString, path::PathBuf};
 
 use anyhow::Context;
 
@@ -53,11 +53,30 @@ pub(crate) fn parse() -> ParseResult<HiArgs> {
     })
 }
 
+/// Parse an explicit argument list and convert it to high level arguments.
+///
+/// This keeps ripgrep's config-file behavior (`RIPGREP_CONFIG_PATH`) but takes
+/// the arguments from the caller instead of the process.
+pub(crate) fn parse_from(args: Vec<OsString>) -> ParseResult<HiArgs> {
+    parse_low_from(args).and_then(|low| match HiArgs::from_low_args(low) {
+        Ok(hi) => ParseResult::Ok(hi),
+        Err(err) => ParseResult::Err(err),
+    })
+}
+
 /// wgrep: parse an explicit argument list, ignoring `RIPGREP_CONFIG_PATH`.
 ///
 /// Index builds use this so the indexed file set does not depend on a
 /// user's config file.
 pub(crate) fn parse_args(args: Vec<OsString>) -> ParseResult<HiArgs> {
+    parse_args_at(args, None)
+}
+
+/// wgrep: parse an explicit argument list with an explicit working directory.
+///
+/// File discovery uses this so the walker runs as if `rg` had been started in
+/// `cwd`, without changing the process working directory.
+pub(crate) fn parse_args_at(args: Vec<OsString>, cwd: impl Into<Option<PathBuf>>) -> ParseResult<HiArgs> {
     let mut low = LowArgs::default();
     if let Err(err) = Parser::new().parse(args.into_iter(), &mut low) {
         return ParseResult::Err(err);
@@ -65,7 +84,7 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> ParseResult<HiArgs> {
     if let Some(special) = low.special.take() {
         return ParseResult::Special(special);
     }
-    match HiArgs::from_low_args(low) {
+    match HiArgs::from_low_args_at(low, cwd.into()) {
         Ok(hi) => ParseResult::Ok(hi),
         Err(err) => ParseResult::Err(err),
     }
@@ -80,6 +99,10 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> ParseResult<HiArgs> {
 /// This will also set one-time global state flags, such as the log level and
 /// whether messages should be printed.
 fn parse_low() -> ParseResult<LowArgs> {
+    parse_low_from(std::env::args_os().skip(1).collect())
+}
+
+fn parse_low_from(raw_args: Vec<OsString>) -> ParseResult<LowArgs> {
     if let Err(err) = crate::logger::Logger::init() {
         let err = anyhow::anyhow!("failed to initialize logger: {err}");
         return ParseResult::Err(err);
@@ -87,7 +110,7 @@ fn parse_low() -> ParseResult<LowArgs> {
 
     let parser = Parser::new();
     let mut low = LowArgs::default();
-    if let Err(err) = parser.parse(std::env::args_os().skip(1), &mut low) {
+    if let Err(err) = parser.parse(raw_args.clone().into_iter(), &mut low) {
         return ParseResult::Err(err);
     }
     // Even though we haven't parsed the config file yet (assuming it exists),
@@ -118,7 +141,7 @@ fn parse_low() -> ParseResult<LowArgs> {
     // The final arguments are just the arguments from the CLI appending to
     // the end of the config arguments.
     let mut final_args = config_args;
-    final_args.extend(std::env::args_os().skip(1));
+    final_args.extend(raw_args);
 
     // Now do the CLI parsing dance again.
     let mut low = LowArgs::default();

@@ -2,7 +2,7 @@
 name = "wgrep"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 license = "MIT"
 description = "wg: semantic code search and ripgrep-compatible text search through one local daemon."
 repository = "https://github.com/holdfast-labs/wgrep"
@@ -14,8 +14,13 @@ name = "sgrep"
 path = "src/main.rs"
 
 [workspace]
+# wisp-grep is its own workspace with a ripgrep-pinned lockfile. Exclude it as
+# a member but keep it as a path dependency so the root lock governs the build.
+exclude = ["crates/wisp-grep"]
 
 [dependencies]
+# The vendored ripgrep 15.1.0 engine, in-process.
+wisp-grep = { path = "crates/wisp-grep" }
 memmap2 = "0.9"
 crc32fast = "1"
 sha2 = "0.11"

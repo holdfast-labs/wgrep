@@ -111,7 +111,18 @@ impl HiArgs {
     ///
     /// This process can fail for a variety of reasons. For example, invalid
     /// globs or some kind of environment issue.
-    pub(crate) fn from_low_args(mut low: LowArgs) -> anyhow::Result<HiArgs> {
+    pub(crate) fn from_low_args(low: LowArgs) -> anyhow::Result<HiArgs> {
+        HiArgs::from_low_args_at(low, None)
+    }
+
+    /// wgrep: convert low-level arguments with an explicit working directory.
+    ///
+    /// File discovery uses this so ignore rules resolve as if `rg` had been
+    /// started in `cwd`, without changing the process working directory.
+    pub(crate) fn from_low_args_at(
+        mut low: LowArgs,
+        cwd: Option<PathBuf>,
+    ) -> anyhow::Result<HiArgs> {
         // Callers should not be trying to convert low-level arguments when
         // a short-circuiting special mode is present.
         assert_eq!(None, low.special, "special mode demands short-circuiting");
@@ -159,7 +170,7 @@ impl HiArgs {
             _ => {}
         }
 
-        let mut state = State::new()?;
+        let mut state = State::new_at(cwd)?;
         let patterns = Patterns::from_low_args(&mut state, &mut low)?;
         let paths = Paths::from_low_args(&mut state, &patterns, &mut low)?;
 
@@ -1164,10 +1175,14 @@ impl State {
     ///
     /// Note that the state values may change throughout the lifetime of
     /// argument parsing.
-    fn new() -> anyhow::Result<State> {
+    /// Initialize state with an optional explicit working directory.
+    fn new_at(cwd: Option<PathBuf>) -> anyhow::Result<State> {
         use std::io::IsTerminal;
 
-        let cwd = current_dir()?;
+        let cwd = match cwd {
+            Some(cwd) => cwd,
+            None => current_dir()?,
+        };
         log::debug!("read CWD from environment: {}", cwd.display());
         Ok(State {
             is_terminal_stdout: std::io::stdout().is_terminal(),

@@ -23,7 +23,10 @@ impl Logger {
     /// global logger. If there was a problem setting the logger, then an
     /// error is returned.
     pub(crate) fn init() -> Result<(), log::SetLoggerError> {
-        log::set_logger(LOGGER)
+        // An in-process caller can run more than one invocation. The logger is
+        // process-global, so an already-initialized logger is not an error.
+        let _ = log::set_logger(LOGGER);
+        Ok(())
     }
 }
 

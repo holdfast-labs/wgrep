@@ -1,10 +1,10 @@
-//! Daemon parity for the unified `wg` lexical (ripgrep) route.
+//! Parity for the unified `wg` lexical (ripgrep) route.
 //!
-//! Each case runs the same argv through the real `wg` binary (client ->
-//! authenticated service -> bounded `rg` child) and through a reference `rg`
-//! directly, then compares stdout, stderr and exit status. Set `WG_RG` to the
-//! reference binary (for example ripgrep 15.1.0); if no `rg` is available the
-//! test skips rather than failing.
+//! Each case runs the same argv through the real `wg` binary (in-process
+//! vendored ripgrep 15.1.0) and through a reference `rg` directly, then
+//! compares stdout, stderr and exit status. Set `WG_RG` to the reference
+//! binary (for example ripgrep 15.1.0); if no `rg` is available the test skips
+//! rather than failing.
 //!
 //! `--sort path` is added to every multi-file case because ripgrep's traversal
 //! order is not deterministic between processes. `--json` output is compared
@@ -29,7 +29,6 @@ fn rg_bin() -> Option<PathBuf> {
 
 struct Fixture {
     root: tempfile::TempDir,
-    service: tempfile::TempDir,
 }
 
 fn fixture() -> Fixture {
@@ -56,10 +55,7 @@ fn fixture() -> Fixture {
     std::fs::write(root.path().join("skip/d.txt"), b"needle hidden\n").unwrap();
     std::fs::write(root.path().join(".ignore"), b"skip/\n").unwrap();
     std::fs::write(root.path().join("crlf.txt"), b"needle\r\nmore\r\n").unwrap();
-    Fixture {
-        root,
-        service: tempfile::tempdir().unwrap(),
-    }
+    Fixture { root }
 }
 
 struct Run {
@@ -93,13 +89,9 @@ fn spawn_and_capture(mut command: Command, stdin: Option<&[u8]>) -> Run {
     }
 }
 
-fn run_wg(rg: &Path, fixture: &Fixture, args: &[&str], stdin: Option<&[u8]>) -> Run {
+fn run_wg(fixture: &Fixture, args: &[&str], stdin: Option<&[u8]>) -> Run {
     let mut command = Command::new(env!("CARGO_BIN_EXE_wg"));
-    command
-        .args(args)
-        .current_dir(fixture.root.path())
-        .env("WG_SERVICE_DIR", fixture.service.path())
-        .env("WG_RG", rg);
+    command.args(args).current_dir(fixture.root.path());
     spawn_and_capture(command, stdin)
 }
 
@@ -121,7 +113,7 @@ fn json_matches(bytes: &[u8]) -> Vec<String> {
 
 fn assert_parity(rg: &Path, fixture: &Fixture, args: &[&str], stdin: Option<&[u8]>) {
     let reference = run_rg(rg, fixture, args, stdin);
-    let ours = run_wg(rg, fixture, args, stdin);
+    let ours = run_wg(fixture, args, stdin);
     let json = args.contains(&"--json");
     let (reference_out, ours_out) = if json {
         (json_matches(&reference.stdout), json_matches(&ours.stdout))
@@ -186,31 +178,12 @@ fn lexical_route_matches_reference_rg() {
     for (args, stdin) in cases {
         assert_parity(&rg, &fixture, args, *stdin);
     }
-
-    // Every request must reach the same shared service process.
-    let first = status_pid(&fixture);
-    let last = status_pid(&fixture);
-    assert!(first.is_some(), "service should report a pid");
-    assert_eq!(first, last, "lexical requests must reuse one daemon pid");
-
-    let down = run_wg(&rg, &fixture, &["down"], None);
-    assert_eq!(down.code, 0, "wg down should stop the service");
 }
 
-fn status_pid(fixture: &Fixture) -> Option<u64> {
-    let out = Command::new(env!("CARGO_BIN_EXE_wg"))
-        .args(["status", "--json"])
-        .env("WG_SERVICE_DIR", fixture.service.path())
-        .output()
-        .expect("status");
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    value["pid"].as_u64()
-}
-
-/// A child that outruns the stdout cap must fail loudly. The reply is an
-/// explicit error, never a truncated-but-successful result.
+/// Large output must pass through unchanged. The old daemon route returned an
+/// explicit error above 8 MiB; the in-process route has no such cap.
 #[test]
-fn lexical_output_cap_is_an_explicit_error() {
+fn large_output_matches_reference() {
     let Some(rg) = rg_bin() else {
         eprintln!("skipping: no ripgrep (set WG_RG)");
         return;
@@ -221,58 +194,10 @@ fn lexical_output_cap_is_an_explicit_error() {
     line.push(b'\n');
     std::fs::write(fixture.root.path().join("big.txt"), &line).unwrap();
 
-    let ours = run_wg(
-        &rg,
-        &fixture,
-        &["-F", "needle", "--sort", "path", "big.txt"],
-        None,
-    );
-    assert_eq!(
-        ours.code, 2,
-        "cap breach must not look like a clean no-match"
-    );
-    assert!(
-        ours.stdout.is_empty(),
-        "no truncated output may be returned"
-    );
-    let stderr = String::from_utf8_lossy(&ours.stderr);
-    assert!(
-        stderr.contains("exceeded the service bound"),
-        "expected an explicit bound error, got {stderr:?}"
-    );
-
-    let down = run_wg(&rg, &fixture, &["down"], None);
-    assert_eq!(down.code, 0, "wg down should stop the service");
-}
-
-/// A child that ignores the clock must be killed at the bound with an explicit
-/// error, so a hung search cannot wedge the shared service.
-#[cfg(unix)]
-#[test]
-fn lexical_timeout_is_an_explicit_error() {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = fixture();
-    let slow = fixture.service.path().join("slow-rg");
-    std::fs::write(&slow, b"#!/bin/sh\nexec sleep 5\n").unwrap();
-    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wg"));
-    command
-        .args(["-F", "needle", "."])
-        .current_dir(fixture.root.path())
-        .env("WG_SERVICE_DIR", fixture.service.path())
-        .env("WG_RG", &slow)
-        .env("WG_LEX_TIMEOUT_MS", "300");
-    let ours = spawn_and_capture(command, None);
-    assert_eq!(ours.code, 2, "a timed-out search must fail");
-    let stderr = String::from_utf8_lossy(&ours.stderr);
-    assert!(
-        stderr.contains("time bound"),
-        "expected an explicit time-bound error, got {stderr:?}"
-    );
-
-    let mut down = Command::new(env!("CARGO_BIN_EXE_wg"));
-    down.args(["down"])
-        .env("WG_SERVICE_DIR", fixture.service.path());
-    assert!(down.status().expect("down").success());
+    let args = ["-F", "needle", "--sort", "path", "big.txt"];
+    let reference = run_rg(&rg, &fixture, &args, None);
+    let ours = run_wg(&fixture, &args, None);
+    assert_eq!(ours.code, reference.code, "exit mismatch");
+    assert_eq!(ours.stdout, reference.stdout, "stdout mismatch");
+    assert_eq!(ours.stderr, reference.stderr, "stderr mismatch");
 }

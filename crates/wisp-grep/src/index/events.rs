@@ -7,11 +7,25 @@
 //! file, never stdout/stderr, so parity output is unaffected.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set when the caller requires a one-shot walk with no index or daemon.
+static WALK_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Force (or allow) the one-shot walk-only mode for this process.
+pub(crate) fn set_walk_only(yes: bool) {
+    WALK_ONLY.store(yes, Ordering::SeqCst);
+}
+
+/// Whether the caller forced the one-shot walk-only mode.
+pub(crate) fn walk_only() -> bool {
+    WALK_ONLY.load(Ordering::SeqCst)
+}
 
 /// Whether the daemon is explicitly disabled for this process. The daemon is
 /// the default, so this is the only override.
 pub(crate) fn daemon_disabled() -> bool {
-    std::env::var_os("WGREP_NO_DAEMON").is_some()
+    walk_only() || std::env::var_os("WGREP_NO_DAEMON").is_some()
 }
 
 /// Appends one NDJSON event, if `WGREP_INDEX_EVENTS` names a file.

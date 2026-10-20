@@ -40,7 +40,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
@@ -276,28 +276,15 @@ pub fn source_files(path: &Path) -> Result<(&Path, Vec<PathBuf>)> {
     } else {
         path.parent().unwrap()
     };
-    let mut command = Command::new("rg");
-    command.args(["--no-config", "--files", "-0"]);
     let target = if path.is_dir() {
         Path::new(".")
     } else {
         Path::new(path.file_name().unwrap())
     };
-    let result = command
-        .arg("--")
-        .arg(target)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("ripgrep is required: {e}"))?;
-    if !matches!(result.status.code(), Some(0 | 1)) {
-        return Err(String::from_utf8_lossy(&result.stderr).into_owned().into());
-    }
-    let mut files: Vec<_> = result
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|b| !b.is_empty())
-        .map(filename)
-        .collect();
+    let mut files = wisp_grep::list_files(root, target)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("file discovery failed: {e:#}").into()
+        })?;
     files.sort_unstable_by(|a, b| {
         a.as_os_str()
             .as_encoded_bytes()
@@ -1047,6 +1034,7 @@ pub fn cli_main() -> ExitCode {
 #[cfg(test)]
 mod resident_parity {
     use super::*;
+    use std::process::Command;
 
     fn fixture_dir() -> PathBuf {
         std::env::var_os("SGREP_FIXTURE_DIR")

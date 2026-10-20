@@ -5,10 +5,8 @@ mod progress;
 #[path = "../service.rs"]
 mod service;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use wgrep::Result;
 use wgrep::lexical::{self, Invocation, Semantic};
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -23,10 +21,10 @@ usage:
   wg down
 
 Semantic sgrep-compatible fused ranking is the default. A familiar ripgrep
-flag such as -F, -e, -n, -l, -g or --files selects ripgrep filesystem search:
-wg then runs an authoritative rg child inside its local service and returns
-rg's raw stdout/stderr and exit status (0 match, 1 no match, 2 error). The
-filesystem route is a real walk, not the semantic index.
+flag such as -F, -e, -n, -l, -g or --files selects the in-process ripgrep
+15.1.0 engine. wg then returns rg's stdout/stderr and exit status (0 match,
+1 no match, 2 error). The filesystem route is a real walk, not the semantic
+index. It does not need an rg binary on PATH.
 
   --top N, -k N     semantic result count, 1..=100 (default 5)
   -n                ripgrep line numbers, not the semantic count
@@ -79,7 +77,7 @@ fn run() -> Result<ExitCode> {
         }
         Invocation::Service { name, rest } => run_service(&name, &rest, cache),
         Invocation::Semantic(semantic) => run_semantic(semantic),
-        Invocation::Lexical { argv } => run_lexical(&argv, cache),
+        Invocation::Lexical { argv } => run_lexical(&argv),
     }
 }
 
@@ -223,43 +221,10 @@ fn run_semantic(semantic: Semantic) -> Result<ExitCode> {
     Ok(ExitCode::from(if results.is_empty() { 1 } else { 0 }))
 }
 
-fn run_lexical(argv: &[String], cache: Option<PathBuf>) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    cwd.to_str()
-        .ok_or("wg requires a UTF-8 working-directory path")?;
-    let stdin = lexical::read_client_stdin()?;
-    let r = service::lexical(argv, &cwd, stdin.as_deref(), cache)?;
-    let status = r["exit_code"]
-        .as_i64()
-        .ok_or("lexical response is missing an exit code")?;
-    if !(0..=255).contains(&status) {
-        return Err("lexical response has an invalid exit code".into());
-    }
-    let stdout = decode(&r["stdout"])?;
-    let stderr = decode(&r["stderr"])?;
-    {
-        let mut out = std::io::stdout().lock();
-        out.write_all(&stdout)?;
-        out.flush()?;
-    }
-    {
-        let mut err = std::io::stderr().lock();
-        err.write_all(&stderr)?;
-        err.flush()?;
-    }
-    Ok(ExitCode::from(if (0..=255).contains(&status) {
-        status as u8
-    } else {
-        2
-    }))
-}
-
-fn decode(value: &serde_json::Value) -> Result<Vec<u8>> {
-    Ok(STANDARD.decode(
-        value
-            .as_str()
-            .ok_or("lexical response is missing a stream payload")?,
-    )?)
+fn run_lexical(argv: &[String]) -> Result<ExitCode> {
+    let argv: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+    let code = wisp_grep::run_rg(argv);
+    Ok(ExitCode::from(code as u8))
 }
 
 fn absolute(path: PathBuf) -> Result<PathBuf> {

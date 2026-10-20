@@ -26,16 +26,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.90
+      - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.90"
+          toolchain: "1.95"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # wg discovers files with ripgrep, so the live-index tests need `rg` on
-      # PATH. Hosted runners do not ship it; use the release's pinned build.
+      # wg does not need `rg`: ripgrep 15.1.0 is built in. The parity tests
+      # compare wg against a real, SHA-256-pinned rg 15.1.0 binary.
       - name: Install ripgrep 15.1.0 (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -73,6 +73,13 @@ jobs:
 
       - name: Run library and binary tests
         run: cargo test --locked --lib --bins
+
+      - name: Run parity tests against rg 15.1.0
+        run: cargo test --locked --test wg_lexical_parity --test wg_source_files_parity
+
+      - name: Run wisp-grep tests
+        working-directory: crates/wisp-grep
+        run: cargo test --locked
 
       - name: Build release wg
         run: cargo build --locked --release --bin wg

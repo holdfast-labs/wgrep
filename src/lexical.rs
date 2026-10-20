@@ -1,39 +1,14 @@
-//! Unified `wg` front-door support: classify one invocation and, for the
-//! filesystem text/regex route, run one bounded, authoritative `rg` child on
-//! behalf of the local service.
+//! Unified `wg` front-door support: classify one invocation into the semantic
+//! or filesystem text/regex route.
 //!
 //! `wg QUERY [ROOT]` stays sgrep-compatible semantic ranking by default. A
 //! familiar ripgrep flag (or any flag `wg` does not own) selects the lexical
-//! route instead: the original argv is handed to an `rg` child so matching,
-//! ignore rules, formatting, JSON output and diagnostics stay ripgrep's, never
-//! a semantic approximation. The child runs inside the same authenticated
-//! service process, with explicit admission, output and time bounds, and its
-//! raw stdout/stderr bytes cross the IPC as base64 so newlines and non-UTF-8
-//! bytes survive intact.
+//! route instead: the original argv is handed to the vendored ripgrep 15.1.0
+//! engine in the `wg` process, so matching, ignore rules, formatting, JSON
+//! output and diagnostics stay ripgrep's, never a semantic approximation.
 //!
 //! Mode is decided by flags only. Natural language versus regex is never
 //! guessed from punctuation, and `--` ends option parsing for both routes.
-
-use std::ffi::OsString;
-use std::io::{IsTerminal, Read, Write};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-/// Raw child-stdout cap. Base64 (x4/3) must stay below the service reply cap.
-pub const MAX_STDOUT: usize = 8 * 1024 * 1024;
-/// Raw child-stderr cap.
-pub const MAX_STDERR: usize = 1024 * 1024;
-/// Cap on stdin forwarded to a child.
-pub const MAX_STDIN: usize = 8 * 1024 * 1024;
-/// Default wall-clock bound for one child; must stay under the frame deadline.
-pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
-/// Hard ceiling for the tunable time bound.
-pub const MAX_TIMEOUT_MS: u64 = 75_000;
-/// Concurrent lexical children one service process admits.
-pub const MAX_CONCURRENT: usize = 4;
 
 /// Flags `wg` itself accepts with no value.
 const WG_BOOL: &[&str] = &["--json", "--explain", "-h", "--help", "-V", "--version"];
@@ -53,7 +28,7 @@ pub enum Invocation {
     },
     /// Default sgrep-compatible semantic search.
     Semantic(Semantic),
-    /// Ripgrep filesystem search: the exact argv for the child.
+    /// Ripgrep filesystem search: the exact argv for the in-process engine.
     Lexical {
         argv: Vec<String>,
     },
@@ -423,226 +398,6 @@ fn push_positional(
     Ok(())
 }
 
-/// The ripgrep executable for this host: `WG_RG`, else `rg` from PATH.
-pub fn rg_program() -> OsString {
-    std::env::var_os("WG_RG").unwrap_or_else(|| OsString::from("rg"))
-}
-
-/// The child time bound: `WG_LEX_TIMEOUT_MS` clamped to a safe ceiling.
-pub fn timeout() -> Duration {
-    let ms = std::env::var("WG_LEX_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&ms| ms > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_MS);
-    Duration::from_millis(ms.min(MAX_TIMEOUT_MS))
-}
-
-/// Raw result of one bounded child run.
-pub struct LexOutput {
-    pub exit_code: i32,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-/// Run one `rg` child with explicit output, time and admission bounds.
-///
-/// Both output pipes are drained on their own threads, so a child that fills
-/// one pipe while writing the other cannot deadlock. Exceeding a cap, or the
-/// time bound, kills the child and returns an explicit error; output is never
-/// silently truncated into a successful reply.
-pub fn run(
-    argv: &[String],
-    cwd: &Path,
-    stdin: Option<&[u8]>,
-    timeout: Duration,
-) -> Result<LexOutput, String> {
-    let program = rg_program();
-    let mut child = Command::new(&program)
-        .args(argv)
-        .current_dir(cwd)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", program.to_string_lossy()))?;
-
-    let overflow = Arc::new(AtomicBool::new(false));
-    let stdout = child.stdout.take().ok_or("missing child stdout pipe")?;
-    let stderr = child.stderr.take().ok_or("missing child stderr pipe")?;
-    let out_overflow = overflow.clone();
-    let out_thread = std::thread::spawn(move || read_capped(stdout, MAX_STDOUT, out_overflow));
-    let err_overflow = overflow.clone();
-    let err_thread = std::thread::spawn(move || read_capped(stderr, MAX_STDERR, err_overflow));
-    let in_thread = stdin.map(|bytes| {
-        let bytes = bytes.to_vec();
-        let mut pipe = child.stdin.take();
-        std::thread::spawn(move || {
-            if let Some(ref mut pipe) = pipe {
-                let _ = pipe.write_all(&bytes);
-            }
-            drop(pipe);
-        })
-    });
-
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let mut status = None;
-    loop {
-        match child.try_wait() {
-            Ok(Some(s)) => {
-                status = Some(s);
-                break;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("waiting for rg failed: {e}"));
-            }
-        }
-        if overflow.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
-            break;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            let _ = child.kill();
-            let _ = child.wait();
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-
-    let out_result = out_thread.join();
-    let err_result = err_thread.join();
-    if let Some(thread) = in_thread {
-        let _ = thread.join();
-    }
-    let (stdout, out_over) =
-        out_result.map_err(|_| "stdout capture worker failed".to_owned())??;
-    let (stderr, err_over) =
-        err_result.map_err(|_| "stderr capture worker failed".to_owned())??;
-
-    if out_over || err_over {
-        return Err(format!(
-            "rg output exceeded the service bound (stdout max {} MiB, stderr max {} MiB)",
-            MAX_STDOUT / (1024 * 1024),
-            MAX_STDERR / (1024 * 1024)
-        ));
-    }
-    if timed_out {
-        return Err(format!(
-            "rg exceeded the {} ms time bound",
-            timeout.as_millis()
-        ));
-    }
-    let status = status.ok_or("rg stopped without an exit status")?;
-    Ok(LexOutput {
-        exit_code: status.code().unwrap_or(2),
-        stdout,
-        stderr,
-    })
-}
-
-fn read_capped(
-    mut reader: impl Read,
-    cap: usize,
-    overflow: Arc<AtomicBool>,
-) -> Result<(Vec<u8>, bool), String> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return Ok((buf, false)),
-            Ok(n) => {
-                if buf.len() + n > cap {
-                    overflow.store(true, Ordering::Release);
-                    return Ok((buf, true));
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                overflow.store(true, Ordering::Release);
-                return Err(format!("capturing rg output failed: {error}"));
-            }
-        }
-    }
-}
-
-/// Read bounded client stdin for forwarding. A terminal stdin forwards
-/// nothing (matching ripgrep, which only reads a non-terminal stdin).
-pub fn read_client_stdin() -> Result<Option<Vec<u8>>, String> {
-    if std::io::stdin().is_terminal() {
-        return Ok(None);
-    }
-    if !stdin_is_data()? {
-        return Ok(None);
-    }
-    let mut buf = Vec::new();
-    let mut stdin = std::io::stdin().lock();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        match stdin.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                if buf.len() + n > MAX_STDIN {
-                    return Err(format!(
-                        "stdin exceeds the {} MiB forwarding bound",
-                        MAX_STDIN / (1024 * 1024)
-                    ));
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("reading stdin: {e}")),
-        }
-    }
-    Ok(Some(buf))
-}
-
-#[cfg(unix)]
-fn stdin_is_data() -> Result<bool, String> {
-    use std::os::fd::AsFd;
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let fd = std::io::stdin()
-        .as_fd()
-        .try_clone_to_owned()
-        .map_err(|e| format!("inspecting stdin: {e}"))?;
-    let metadata = std::fs::File::from(fd)
-        .metadata()
-        .map_err(|e| format!("inspecting stdin: {e}"))?;
-    let null = std::fs::metadata("/dev/null").map_err(|e| format!("inspecting /dev/null: {e}"))?;
-    Ok(!(metadata.file_type().is_char_device() && metadata.rdev() == null.rdev()))
-}
-
-#[cfg(windows)]
-fn stdin_is_data() -> Result<bool, String> {
-    use std::os::windows::io::AsRawHandle;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetFileType(handle: *mut std::ffi::c_void) -> u32;
-    }
-    // Windows NUL is a character device, not an empty pipe. Retain Some(empty)
-    // for a genuine empty pipe/file so rg does not search the cwd instead.
-    let kind = unsafe { GetFileType(std::io::stdin().as_raw_handle()) } & !0x8000;
-    match kind {
-        1 | 3 => Ok(true),
-        2 => Ok(false),
-        _ => Err("cannot identify redirected stdin".into()),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn stdin_is_data() -> Result<bool, String> {
-    Ok(true)
-}
 
 #[cfg(test)]
 mod tests {
@@ -799,25 +554,6 @@ mod tests {
             let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
             assert!(classify(&args).is_err(), "{args:?}");
         }
-    }
-
-    #[test]
-    fn output_read_failure_cannot_become_a_partial_success() {
-        struct BrokenReader(bool);
-        impl Read for BrokenReader {
-            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-                if !self.0 {
-                    self.0 = true;
-                    out[0] = b'x';
-                    Ok(1)
-                } else {
-                    Err(std::io::Error::other("injected capture failure"))
-                }
-            }
-        }
-        let overflow = Arc::new(AtomicBool::new(false));
-        assert!(read_capped(BrokenReader(false), 1024, overflow.clone()).is_err());
-        assert!(overflow.load(Ordering::Acquire));
     }
 
     #[test]
