@@ -6,8 +6,8 @@ mod progress;
 mod service;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use sgrep::Result;
-use sgrep::lexical::{self, Invocation, Semantic};
+use wgrep::Result;
+use wgrep::lexical::{self, Invocation, Semantic};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;

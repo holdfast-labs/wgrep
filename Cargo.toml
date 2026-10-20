@@ -1,11 +1,17 @@
 [package]
-name = "sgrep"
-version = "0.3.0"
+name = "wgrep"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-description = "Search code and text with ripgrep and local static embeddings."
+description = "wg: semantic code search and ripgrep-compatible text search through one local daemon."
 repository = "https://github.com/holdfast-labs/wgrep"
+
+# The upstream sgrep CLI stays available under its original name for parity
+# checks. Release archives ship only `wg`.
+[[bin]]
+name = "sgrep"
+path = "src/main.rs"
 
 [workspace]
 

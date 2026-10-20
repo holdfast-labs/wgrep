@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """wg preview packaging helper.
 
-Builds reproducible Windows/Linux PREVIEW archives for the `wg` core CLI
-(`crates/wgrep-sgrep-core`) from an explicit source export, with checksums,
-source identity, license/provenance copies, and a clean-install smoke test.
+Builds reproducible Windows/Linux PREVIEW archives for the `wg` crate at the
+repository root from an explicit source export, with checksums, source
+identity, license/provenance copies, and a clean-install smoke test.
 
 This tool never commits, tags, uploads, or creates a release. It never builds
 Rust. Binaries are read-only inputs given explicitly with ``--wg`` and
@@ -11,7 +11,7 @@ Rust. Binaries are read-only inputs given explicitly with ``--wg`` and
 bundled.
 
 Subcommands:
-  export     select wgcore + vendored notify source into a clean export tree
+  export     select the root crate source into a clean export tree
   archive    assemble a PREVIEW archive from an export and explicit binaries
   smoke      run a tiny isolated-fixture smoke test against an installed wg
   self-test  exercise export/archive/smoke safety rules without a new binary
@@ -47,18 +47,21 @@ NOT_OFFICIAL = (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-CORE_REL = "crates/wgrep-sgrep-core"
-NOTIFY_REL = "crates/wisp-grep/vendor/notify"
-
-EXPORT_ROOTS = [
-    (CORE_REL, "source/" + CORE_REL),
-    (NOTIFY_REL, "source/" + NOTIFY_REL),
+EXPORT_PATHS = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "llms.txt",
+    "BASELINE_PROVENANCE.md",
+    "src",
+    "tests",
+    "vendor/notify",
+    "third_party",
+    "docs",
 ]
-EXTRA_FILES = [
-    ("crates/wisp-grep/LICENSE-MIT", "third_party/ripgrep/LICENSE-MIT"),
-    ("crates/wisp-grep/UNLICENSE", "third_party/ripgrep/UNLICENSE"),
-    ("crates/wisp-grep/COPYING", "third_party/ripgrep/COPYING"),
-]
+EXPORT_EXCLUDED_PATHS = ["docs/launch"]
+THIRD_PARTY_LICENSES = ["LICENSE-MIT", "UNLICENSE", "COPYING"]
 
 EXCLUDED_SEGMENTS = {
     "target",
@@ -147,15 +150,21 @@ def rel_excluded(rel: Path) -> str | None:
     parts = set(rel.parts)
     if parts & EXCLUDED_SEGMENTS:
         return "excluded segment"
-    core_parts = Path(CORE_REL).parts
-    if rel.parts[:len(core_parts)] == core_parts and len(rel.parts) > len(core_parts):
-        if rel.parts[len(core_parts)] in RUNTIME_ROOTS:
-            return "runtime output root"
+    if len(rel.parts) > 1 and rel.parts[0] in RUNTIME_ROOTS:
+        return "runtime output root"
     if rel.suffix.lower() in EXCLUDED_SUFFIXES:
         return "excluded suffix"
     if rel.name in EXCLUDED_NAMES:
         return "excluded name"
     return None
+
+
+def explicitly_excluded(rel: Path) -> bool:
+    for value in EXPORT_EXCLUDED_PATHS:
+        excluded = Path(value)
+        if rel == excluded or rel.is_relative_to(excluded):
+            return True
+    return False
 
 
 def sensitive_reason(rel: Path) -> str | None:
@@ -169,17 +178,22 @@ def sensitive_reason(rel: Path) -> str | None:
 
 def iter_selection(repo: Path):
     selected = []
-    for root_rel, dest_rel in EXPORT_ROOTS:
+    for value in EXPORT_PATHS:
+        root_rel = Path(value)
         root = repo / root_rel
+        if root.is_file():
+            if not explicitly_excluded(root_rel):
+                selected.append((root, rel_norm(root_rel)))
+            continue
         if not root.is_dir():
-            raise ReleaseError(f"export root missing: {root_rel}")
+            raise ReleaseError(f"export path missing: {value}")
         for cur_dir, dir_names, file_names in os.walk(root, followlinks=False):
             cur = Path(cur_dir)
             kept = []
             for d in dir_names:
                 dpath = cur / d
                 drel = dpath.relative_to(repo)
-                if rel_excluded(drel):
+                if explicitly_excluded(drel) or rel_excluded(drel):
                     continue
                 if is_reparse(dpath):
                     raise ReleaseError(f"refusing to export symlink/reparse directory: {drel}")
@@ -188,15 +202,9 @@ def iter_selection(repo: Path):
             for f in file_names:
                 fpath = cur / f
                 frel = fpath.relative_to(repo)
-                if rel_excluded(frel):
+                if explicitly_excluded(frel) or rel_excluded(frel):
                     continue
-                src_rel = frel.relative_to(root_rel)
-                selected.append((fpath, rel_norm(Path(dest_rel) / src_rel)))
-    for src_rel, dest_rel in EXTRA_FILES:
-        fpath = repo / src_rel
-        if not fpath.is_file():
-            raise ReleaseError(f"required license file missing: {src_rel}")
-        selected.append((fpath, dest_rel))
+                selected.append((fpath, rel_norm(frel)))
     selected.sort(key=lambda pair: pair[1])
     return selected
 
@@ -236,8 +244,8 @@ def copy_one(src: Path, dest: Path, mutate_hook=None):
 def export_tree(repo: Path, out: Path, force=False, mutate_hook=None) -> ExportResult:
     repo = repo.resolve()
     out = out.resolve()
-    if not (repo / CORE_REL).is_dir():
-        raise ReleaseError(f"not a wispd checkout (missing {CORE_REL}): {repo}")
+    if not (repo / "Cargo.toml").is_file():
+        raise ReleaseError(f"not a wg checkout (missing Cargo.toml): {repo}")
     if out.is_relative_to(repo):
         raise ReleaseError("source exports must be outside the checkout")
     if out.exists() and any(out.iterdir()) and not force:
@@ -347,11 +355,14 @@ def export_notice_text(repo, git_info, export_id, file_count):
         "",
         "SELECTION",
         "  included roots:",
-        f"    - {CORE_REL}",
-        f"    - {NOTIFY_REL}",
-        "  included extra files:",
     ]
-    lines.extend(f"    - {src}" for src, _ in EXTRA_FILES)
+    lines.extend(f"    - {value}" for value in EXPORT_PATHS)
+    lines.extend(
+        [
+            "  explicitly excluded paths:",
+        ]
+    )
+    lines.extend(f"    - {value}" for value in EXPORT_EXCLUDED_PATHS)
     lines.extend(
         [
             "  excluded: target/, .git/, node_modules/, __pycache__/, build",
@@ -594,10 +605,22 @@ def zip_add(zf, path: Path, arcname: str, mode=0o644):
         zf.writestr(zi, f.read())
 
 
+def _source_copy_ignore(export_dir: Path):
+    root = export_dir.resolve()
+
+    def ignore(directory, names):
+        if Path(directory).resolve() != root:
+            return []
+        return [n for n in names if n in ("SOURCE_MANIFEST.sha256", "EXPORT_NOTICE.txt")]
+
+    return ignore
+
+
 def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
-                  build_id, binary_status, work: Path, cargo_registry=None):
+                  build_id, binary_status, work: Path, cargo_registry=None,
+                  label=LABEL):
     stage_root = Path(tempfile.mkdtemp(prefix="wg-stage-", dir=str(work)))
-    root_name = f"wg-{version}-{platform}-{LABEL}-{build_id}"
+    root_name = f"wg-{version}-{platform}-{label}-{build_id}"
     root = stage_root / root_name
     (root / "bin").mkdir(parents=True)
     (root / "docs").mkdir()
@@ -609,7 +632,7 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
     shutil.copyfile(binary_wg, root / "bin" / wg_name)
     shutil.copyfile(binary_rg, root / "bin" / rg_name)
 
-    core = export.out_dir / "source" / CORE_REL
+    core = export.out_dir
     # The README is written for a package root: it links `docs/...`. Keep it at
     # the archive root so those links resolve, and ship the media it embeds.
     shutil.copyfile(core / "README.md", root / "README.md")
@@ -629,19 +652,21 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
     shutil.copyfile(core / "llms.txt", root / "docs" / "llms.txt")
     shutil.copyfile(core / "LICENSE", root / "licenses" / "sgrep-LICENSE")
     shutil.copyfile(
-        core / ".." / "wisp-grep" / "vendor" / "notify" / "LICENSE-CC0",
+        core / "vendor" / "notify" / "LICENSE-CC0",
         root / "licenses" / "notify-LICENSE-CC0",
     )
-    for src, dest_rel in EXTRA_FILES:
-        name = Path(dest_rel).name
-        shutil.copyfile(export.out_dir / dest_rel, root / "licenses" / f"ripgrep-{name}")
+    for name in THIRD_PARTY_LICENSES:
+        shutil.copyfile(
+            core / "third_party" / "ripgrep" / name,
+            root / "licenses" / f"ripgrep-{name}",
+        )
 
     registry = resolve_registry(cargo_registry)
     copied, unavailable = collect_dependency_licenses(
         core / "Cargo.lock", registry, root / "licenses" / "deps"
     )
 
-    shutil.copytree(export.out_dir / "source", root / "source")
+    shutil.copytree(core, root / "source", ignore=_source_copy_ignore(core))
     shutil.copyfile(
         export.manifest_path, root / "PROVENANCE" / "SOURCE_MANIFEST.sha256"
     )
@@ -662,9 +687,12 @@ def stage_archive(binary_wg: Path, binary_rg: Path, export, platform, version,
     rg_code, rg_vline, _ = binary_version(binary_rg)
 
     build_info = {
-        "label": LABEL,
-        "not_official_release": True,
-        "note": NOT_OFFICIAL,
+        "label": label,
+        "not_official_release": label != "RELEASE",
+        "note": NOT_OFFICIAL if label != "RELEASE" else (
+            "Release packaging artifact. The draft release must pass review "
+            "before it is published."
+        ),
         "package": "wg",
         "version": version,
         "build_id": build_id,
@@ -807,9 +835,10 @@ def cmd_archive(args):
         _, wg_vline, _ = binary_version(binary_wg)
         version = parse_wg_version(wg_vline) or _core_version(export.out_dir) or "0.0.0-preview"
     build_id = args.build_id or export.export_id[:12]
+    label = getattr(args, "label", LABEL)
     ext = "zip" if platform.startswith("windows") else "tar.gz"
     out_file = Path(args.out).resolve() if args.out else (
-        work / "out" / f"wg-{version}-{platform}-{LABEL}-{build_id}.{ext}"
+        work / "out" / f"wg-{version}-{platform}-{label}-{build_id}.{ext}"
     )
     if out_file.exists() and (args.force or out_file.stat().st_size == 0) is False:
         raise ReleaseError(f"output archive exists (use --force): {out_file}")
@@ -817,7 +846,7 @@ def cmd_archive(args):
 
     stage_root, root_name, build_info = stage_archive(
         binary_wg, binary_rg, export, platform, version, build_id,
-        args.binary_status, work, args.cargo_registry,
+        args.binary_status, work, args.cargo_registry, label=label,
     )
     try:
         pack_archive(stage_root / root_name, root_name, out_file, platform)
@@ -837,7 +866,7 @@ def cmd_archive(args):
         }, indent=2, sort_keys=True))
     else:
         print(f"archive ok: {out_file.name}")
-        print(f"label: {LABEL} (not an official release)")
+        print(f"label: {label}")
         print(f"sha256: {archive_sha}")
         print(f"binary_status: {args.binary_status}")
     return 0
@@ -865,7 +894,7 @@ def _load_export(out_dir: Path):
 
 
 def _core_version(export_dir: Path):
-    cargo = export_dir / "source" / CORE_REL / "Cargo.toml"
+    cargo = export_dir / "Cargo.toml"
     if not cargo.is_file():
         return None
     for line in cargo.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -1093,42 +1122,49 @@ class SelfTest:
 
 
 def make_mini_repo(base: Path, symlink=False, sensitive=False):
-    core = base / "crates" / "wgrep-sgrep-core"
-    (core / "src").mkdir(parents=True)
-    (core / "docs").mkdir()
-    (core / "target").mkdir()
-    (core / "__pycache__").mkdir()
-    (core / "Cargo.toml").write_text(
-        '[package]\nname = "sgrep"\nversion = "9.9.9"\n', encoding="utf-8"
+    (base / "src").mkdir(parents=True)
+    (base / "tests").mkdir()
+    (base / "docs").mkdir()
+    (base / "docs" / "launch").mkdir()
+    (base / "target").mkdir()
+    (base / "__pycache__").mkdir()
+    (base / "Cargo.toml").write_text(
+        '[package]\nname = "wgrep"\nversion = "9.9.9"\n', encoding="utf-8"
     )
-    (core / "Cargo.lock").write_text(
+    (base / "Cargo.lock").write_text(
         '[[package]]\nname = "memmap2"\nversion = "0.9.9"\n\n'
         '[[package]]\nname = "example"\nversion = "1.0.0"\n',
         encoding="utf-8",
     )
-    (core / "src" / "lib.rs").write_text("pub fn x() {}\n", encoding="utf-8")
-    (core / "README.md").write_text("# test\n", encoding="utf-8")
-    (core / "docs" / "agent-guide.md").write_text("# agents\n", encoding="utf-8")
-    (core / "docs" / "benchmarks.md").write_text("# bench\n", encoding="utf-8")
-    (core / "BASELINE_PROVENANCE.md").write_text("# prov\n", encoding="utf-8")
-    (core / "llms.txt").write_text("llms\n", encoding="utf-8")
-    (core / "LICENSE").write_text("MIT test\n", encoding="utf-8")
-    (core / "target" / "junk.bin").write_bytes(b"build junk")
-    (core / "__pycache__" / "x.pyc").write_bytes(b"pyc")
-    notify = base / "crates" / "wisp-grep" / "vendor" / "notify"
+    (base / "src" / "lib.rs").write_text("pub fn x() {}\n", encoding="utf-8")
+    (base / "src" / "bin").mkdir()
+    (base / "src" / "bin" / "wg.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (base / "tests" / "smoke.rs").write_text("// test\n", encoding="utf-8")
+    (base / "README.md").write_text("# test\n", encoding="utf-8")
+    (base / "docs" / "agent-guide.md").write_text("# agents\n", encoding="utf-8")
+    (base / "docs" / "benchmarks.md").write_text("# bench\n", encoding="utf-8")
+    (base / "docs" / "release-protocol.md").write_text("# protocol\n", encoding="utf-8")
+    (base / "docs" / "launch" / "private.md").write_text("# private\n", encoding="utf-8")
+    (base / "BASELINE_PROVENANCE.md").write_text("# prov\n", encoding="utf-8")
+    (base / "llms.txt").write_text("llms\n", encoding="utf-8")
+    (base / "LICENSE").write_text("MIT test\n", encoding="utf-8")
+    (base / "target" / "junk.bin").write_bytes(b"build junk")
+    (base / "__pycache__" / "x.pyc").write_bytes(b"pyc")
+    notify = base / "vendor" / "notify"
     (notify / "src").mkdir(parents=True)
     (notify / "target").mkdir()
     (notify / "src" / "lib.rs").write_text("pub fn n() {}\n", encoding="utf-8")
     (notify / "LICENSE-CC0").write_text("CC0 test\n", encoding="utf-8")
     (notify / "target" / "junk").write_bytes(b"x")
-    wg = base / "crates" / "wisp-grep"
-    (wg / "LICENSE-MIT").write_text("MIT test\n", encoding="utf-8")
-    (wg / "UNLICENSE").write_text("unlicense test\n", encoding="utf-8")
-    (wg / "COPYING").write_text("copying test\n", encoding="utf-8")
+    ripgrep = base / "third_party" / "ripgrep"
+    ripgrep.mkdir(parents=True)
+    (ripgrep / "LICENSE-MIT").write_text("MIT test\n", encoding="utf-8")
+    (ripgrep / "UNLICENSE").write_text("unlicense test\n", encoding="utf-8")
+    (ripgrep / "COPYING").write_text("copying test\n", encoding="utf-8")
     if symlink:
-        (core / "src" / "link.rs").symlink_to(core / "src" / "lib.rs")
+        (base / "src" / "link.rs").symlink_to(base / "src" / "lib.rs")
     if sensitive:
-        (core / "src" / ".env").write_text("SECRET=1\n", encoding="utf-8")
+        (base / "src" / ".env").write_text("SECRET=1\n", encoding="utf-8")
     return base
 
 
@@ -1161,9 +1197,15 @@ def run_self_test(args):
         repo = make_mini_repo(sandbox / "r1")
         out = sandbox / "o1"
         res = export_tree(repo, out)
-        assert not (out / "source" / CORE_REL / "target" / "junk.bin").exists(), "target not excluded"
-        assert not (out / "source" / CORE_REL / "__pycache__").exists(), "__pycache__ not excluded"
-        assert (out / "source" / CORE_REL / "src" / "lib.rs").is_file(), "lib.rs missing"
+        assert (out / "Cargo.toml").is_file(), "Cargo.toml missing at export root"
+        assert (out / "src" / "lib.rs").is_file(), "lib.rs missing"
+        assert (out / "src" / "bin" / "wg.rs").is_file(), "wg.rs missing"
+        assert (out / "tests" / "smoke.rs").is_file(), "tests missing"
+        assert (out / "vendor" / "notify" / "src" / "lib.rs").is_file(), "notify missing"
+        assert (out / "third_party" / "ripgrep" / "COPYING").is_file(), "third_party missing"
+        assert not (out / "target").exists(), "target not excluded"
+        assert not (out / "__pycache__").exists(), "__pycache__ not excluded"
+        assert not (out / "docs" / "launch").exists(), "docs/launch not excluded"
         assert res.file_count > 0
         return ("PASS", f"{res.file_count} files")
 
@@ -1227,7 +1269,7 @@ def run_self_test(args):
     def case_directory_symlink():
         repo = make_mini_repo(sandbox / "r-dirlink")
         try:
-            (repo / CORE_REL / "src" / "linked").symlink_to(repo / CORE_REL / "src", target_is_directory=True)
+            (repo / "src" / "linked").symlink_to(repo / "src", target_is_directory=True)
         except OSError as exc:
             return ("SKIP", str(exc))
         try:
@@ -1238,12 +1280,11 @@ def run_self_test(args):
 
     def case_runtime_roots():
         repo = make_mini_repo(sandbox / "r-runtime")
-        core = repo / CORE_REL
         for name in RUNTIME_ROOTS:
-            (core / name).mkdir()
-            (core / name / "runtime-data.bin").write_bytes(b"not source")
-        (core / "src" / "models").mkdir()
-        (core / "src" / "models" / "real.rs").write_text("// legitimate nested source\n")
+            (repo / name).mkdir()
+            (repo / name / "runtime-data.bin").write_bytes(b"not source")
+        (repo / "src" / "models").mkdir()
+        (repo / "src" / "models" / "real.rs").write_text("// legitimate nested source\n")
         exported = export_tree(repo, sandbox / "o-runtime")
         assert any(p.endswith("src/models/real.rs") for p in exported.manifest_map)
         assert not any(p.endswith("runtime-data.bin") for p in exported.manifest_map)
@@ -1422,7 +1463,7 @@ def build_parser():
     p = argparse.ArgumentParser(prog="wg_release.py", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
 
-    ep = sub.add_parser("export", help="export wgcore + vendored notify source")
+    ep = sub.add_parser("export", help="export root crate + vendored notify source")
     ep.add_argument("--repo", default=str(REPO_ROOT))
     ep.add_argument("--out", required=True)
     ep.add_argument("--force", action="store_true")
@@ -1442,6 +1483,7 @@ def build_parser():
     ap.add_argument("--build-id", default=None)
     ap.add_argument("--binary-status", default="provided-old-binary-preview",
                     choices=["provided-old-binary-preview", "final"])
+    ap.add_argument("--label", default=LABEL, choices=["PREVIEW", "RELEASE"])
     ap.add_argument("--cargo-registry", default=None)
     ap.add_argument("--work", default=str(DEFAULT_WORK))
     ap.add_argument("--force", action="store_true")

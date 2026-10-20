@@ -1646,31 +1646,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sgrep"
-version = "0.3.0"
-dependencies = [
- "base64 0.22.1",
- "chonkie",
- "clap",
- "crc32fast",
- "half",
- "hf-hub",
- "memchr",
- "memmap2",
- "notify",
- "rayon",
- "regex",
- "safetensors",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokenizers",
- "tree-sitter",
- "tree-sitter-language-pack",
-]
-
-[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2214,6 +2189,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "wgrep"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chonkie",
+ "clap",
+ "crc32fast",
+ "half",
+ "hf-hub",
+ "memchr",
+ "memmap2",
+ "notify",
+ "rayon",
+ "regex",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokenizers",
+ "tree-sitter",
+ "tree-sitter-language-pack",
 ]
 
 [[package]]

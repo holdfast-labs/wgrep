@@ -7,5 +7,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    sgrep::shared::main()
+    wgrep::shared::main()
 }

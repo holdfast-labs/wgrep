@@ -1,0 +1,257 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (for example v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RIPGREP_VERSION: "15.1.0"
+  WG_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
+          test "v${version}" = "${WG_TAG}" || {
+            echo "tag ${WG_TAG} does not match Cargo.toml version v${version}" >&2
+            exit 1
+          }
+
+  linux:
+    name: linux-x86_64
+    needs: preflight
+    # Oldest supported hosted runner: the binary links against glibc 2.35, so
+    # it also runs on Ubuntu 22.04 / Debian 12 and newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust 1.90
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build wg
+        run: cargo build --locked --release --bin wg
+
+      - name: Download and verify ripgrep 15.1.0
+        env:
+          RG_ASSET: ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz
+          RG_SHA256: 1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+        run: |
+          set -euo pipefail
+          url="https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${RG_ASSET}"
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${RG_ASSET}" "${url}"
+          echo "${RG_SHA256}  ${RUNNER_TEMP}/${RG_ASSET}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/rg"
+          tar --extract --gzip --file "${RUNNER_TEMP}/${RG_ASSET}" \
+            --directory "${RUNNER_TEMP}/rg" --strip-components=1
+          "${RUNNER_TEMP}/rg/rg" --version
+
+      - name: Export source
+        run: python3 scripts/wg_release.py export --out "${RUNNER_TEMP}/export"
+
+      - name: Build archive
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/out"
+          python3 scripts/wg_release.py archive \
+            --wg target/release/wg \
+            --rg "${RUNNER_TEMP}/rg/rg" \
+            --platform linux-x64 \
+            --export "${RUNNER_TEMP}/export" \
+            --binary-status final \
+            --label RELEASE \
+            --work "${RUNNER_TEMP}/archive-work" \
+            --out "${RUNNER_TEMP}/out/wg-${WG_TAG#v}-linux-x64.tar.gz"
+
+      - name: Extract archive
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bundle"
+          tar --extract --gzip \
+            --file "${RUNNER_TEMP}/out/wg-${WG_TAG#v}-linux-x64.tar.gz" \
+            --directory "${RUNNER_TEMP}/bundle"
+          bundle=$(find "${RUNNER_TEMP}/bundle" -mindepth 1 -maxdepth 1 -type d)
+          echo "WG_BUNDLE=${bundle}" >> "${GITHUB_ENV}"
+
+      - name: Verify archive checksums
+        run: |
+          set -euo pipefail
+          cd "${WG_BUNDLE}"
+          sha256sum --check --strict PROVENANCE/SHA256SUMS
+
+      - name: Smoke test extracted archive
+        run: |
+          set -euo pipefail
+          python3 scripts/wg_release.py smoke \
+            --wg "${WG_BUNDLE}/bin/wg" \
+            --rg "${WG_BUNDLE}/bin/rg" \
+            --work "${RUNNER_TEMP}/smoke" \
+            --timeout 900
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-linux-x64
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  windows:
+    name: windows-x86_64
+    needs: preflight
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust 1.90
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build wg
+        run: cargo build --locked --release --bin wg
+
+      - name: Download and verify ripgrep 15.1.0
+        env:
+          RG_ASSET: ripgrep-15.1.0-x86_64-pc-windows-msvc.zip
+          RG_SHA256: 124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/BurntSushi/ripgrep/releases/download/$env:RIPGREP_VERSION/$env:RG_ASSET"
+          $file = Join-Path $env:RUNNER_TEMP $env:RG_ASSET
+          Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          if ($actual -ne $env:RG_SHA256.ToLowerInvariant()) {
+            throw "ripgrep SHA-256 mismatch: expected $env:RG_SHA256 got $actual"
+          }
+          Expand-Archive -LiteralPath $file -DestinationPath "$env:RUNNER_TEMP\rg" -Force
+          & "$env:RUNNER_TEMP\rg\rg.exe" --version
+
+      - name: Export source
+        run: python scripts/wg_release.py export --out "$env:RUNNER_TEMP\export"
+
+      - name: Build archive
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\out" | Out-Null
+          $version = $env:WG_TAG.TrimStart("v")
+          python scripts/wg_release.py archive `
+            --wg target/release/wg.exe `
+            --rg "$env:RUNNER_TEMP\rg\rg.exe" `
+            --platform windows-x64 `
+            --export "$env:RUNNER_TEMP\export" `
+            --binary-status final `
+            --label RELEASE `
+            --work "$env:RUNNER_TEMP\archive-work" `
+            --out "$env:RUNNER_TEMP\out\wg-$version-windows-x64.zip"
+          if ($LASTEXITCODE -ne 0) { throw "archive failed with exit code $LASTEXITCODE" }
+
+      - name: Extract archive
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\out\*.zip" | Select-Object -First 1
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath "$env:RUNNER_TEMP\bundle" -Force
+          $bundle = (Get-ChildItem "$env:RUNNER_TEMP\bundle" -Directory | Select-Object -First 1).FullName
+          "WG_BUNDLE=$bundle" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify archive checksums
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bad = @()
+          Get-Content "$env:WG_BUNDLE\PROVENANCE\SHA256SUMS" | ForEach-Object {
+            $parts = $_ -split "  ", 2
+            $path = Join-Path $env:WG_BUNDLE $parts[1]
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            if ($actual -ne $parts[0]) { $bad += $parts[1] }
+          }
+          if ($bad.Count -gt 0) { throw "checksum mismatch: $($bad -join ', ')" }
+
+      - name: Smoke test extracted archive
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/wg_release.py smoke `
+            --wg "$env:WG_BUNDLE\bin\wg.exe" `
+            --rg "$env:WG_BUNDLE\bin\rg.exe" `
+            --work "$env:RUNNER_TEMP\smoke" `
+            --timeout 900
+          if ($LASTEXITCODE -ne 0) { throw "smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-windows-x64
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  publish:
+    name: draft release
+    needs:
+      - linux
+      - windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name "*.zip" -o -name "*.tar.gz" \) -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.WG_TAG }}
+          name: ${{ env.WG_TAG }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*
+
+  # macos:
+  #   # TODO: add an x86_64/aarch64 macOS job after the build and smoke are
+  #   # validated on macOS runners. Do not publish an untested macOS archive.
+  #   runs-on: macos-latest
+  #   steps:
+  #     - run: echo "macOS packaging is not enabled yet"

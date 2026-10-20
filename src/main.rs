@@ -5,5 +5,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    sgrep::cli_main()
+    wgrep::cli_main()
 }

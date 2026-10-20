@@ -3,9 +3,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use sgrep::lexical;
-use sgrep::live::{LiveIndex, ModelPool};
-use sgrep::{ModelChoice, Result};
+use wgrep::lexical;
+use wgrep::live::{LiveIndex, ModelPool};
+use wgrep::{ModelChoice, Result};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -706,8 +706,8 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                     .into());
                 }
                 let revision = r.index.stats().model_revision;
-                if (requested_model == ModelChoice::Code && revision != sgrep::CODE.revision)
-                    || (requested_model == ModelChoice::Text && revision != sgrep::TEXT.revision)
+                if (requested_model == ModelChoice::Code && revision != wgrep::CODE.revision)
+                    || (requested_model == ModelChoice::Text && revision != wgrep::TEXT.revision)
                 {
                     return Err("query model differs from attached root model; use the model selected by wg up".into());
                 }
