@@ -1,0 +1,79 @@
+{
+  "schema": "wgrep-wg-release-v1",
+  "description": "Explicit query sets and text-matrix cells for WGREP_WG_RELEASE.py. Tokens define the generated scratch fixture so the queries can never drift from the files they target. Text cells are run verbatim against both the unified wg front door and the authoritative rg 15.1 control with the same argv, cwd, stdout/stderr bytes and exit status.",
+  "tokens": {
+    "alpha_old": "AuroraOldV17",
+    "alpha_new": "AuroraNewV18",
+    "restored_old": "RestoredOldTok00",
+    "restored_new": "QuietRestoredV42",
+    "added": "CelestialAddedV31",
+    "ignored": "IgnoredMarkerV55",
+    "ignored_keep": "RetainedIgnoredV77",
+    "beta": "BorealisUniqueV29",
+    "background_prefix": "background",
+    "bench_a": "BenchToggleAaa00",
+    "bench_b": "BenchToggleBbb11"
+  },
+  "semantic_count": {
+    "control_flag": "-n",
+    "candidate_flag": "--top",
+    "candidate_alias": "-k",
+    "note": "The pinned sgrep control keeps -n N. The unified wg front door must use --top N (alias -k N); -n stays reserved for rg line numbers."
+  },
+  "mutations": [
+    {"id": "baseline", "mutation": null, "query": "AuroraOldV17",
+     "expect": {"contains": "AuroraOldV17", "path": "sub/alpha.rs"}},
+    {"id": "edit-same-length", "mutation": "edit_alpha", "query": "AuroraNewV18",
+     "expect": {"contains": "AuroraNewV18", "forbid_substring": "AuroraOldV17"}},
+    {"id": "create", "mutation": "create_added", "query": "CelestialAddedV31",
+     "expect": {"path": "created.rs", "contains": "CelestialAddedV31"}},
+    {"id": "rename", "mutation": "rename_added", "query": "CelestialAddedV31",
+     "expect": {"path": "renamed.rs", "forbid_path": "created.rs"}},
+    {"id": "delete", "mutation": "delete_added", "query": "CelestialAddedV31",
+     "expect": {"forbid_path": "renamed.rs", "forbid_substring": "CelestialAddedV31"}},
+    {"id": "restored-mtime", "mutation": "restored_mtime", "query": "QuietRestoredV42",
+     "expect": {"contains": "QuietRestoredV42", "path": "sub/restored.rs"}},
+    {"id": "ignore-edit", "mutation": "unignore_ignored", "query": "IgnoredMarkerV55",
+     "expect": {"contains": "IgnoredMarkerV55"}}
+  ],
+  "text_cells": [
+    {"id": "literal-fixed", "args": ["-F", "-e", "alpha ledger decoder", "."]},
+    {"id": "regex", "args": ["-e", "background_[0-9]+", "."]},
+    {"id": "line-numbers", "args": ["-n", "-e", "background_0000", "."]},
+    {"id": "list-files", "args": ["-l", "-e", "helper", "."]},
+    {"id": "files-only", "args": ["--files"]},
+    {"id": "glob-rust", "args": ["-g", "*.rs", "-e", "ordinary helper", "."]},
+    {"id": "ignore-default", "args": ["-e", "RetainedIgnoredV77", "."]},
+    {"id": "ignore-disabled", "args": ["--no-ignore", "-e", "RetainedIgnoredV77", "."]},
+    {"id": "scoped-subdir", "args": ["-e", "restored mtime fixture", "sub"]},
+    {"id": "json-lines", "args": ["--json", "-e", "alpha ledger decoder", "."]},
+    {"id": "null-data", "args": ["--null-data", "-e", "alpha ledger decoder", "."]},
+    {"id": "binary-after-nul", "args": ["-a", "-e", "needle_after_nul_harbor", "binary_nul.bin"]},
+    {"id": "error-bad-regex", "args": ["-e", "(", "."], "expect_error": true},
+    {"id": "error-missing-path", "args": ["-e", "alpha ledger decoder", "no_such_dir_zzz"], "expect_error": true}
+  ],
+  "warm_semantic": [
+    "alpha ledger decoder",
+    "restored mtime fixture",
+    "ordinary helper number",
+    "beta queue scheduler"
+  ],
+  "warm_text": [
+    {"id": "warm-literal", "args": ["-F", "-e", "background_0000", "."]},
+    {"id": "warm-regex", "args": ["-e", "background_[0-9]+", "."]},
+    {"id": "warm-list", "args": ["-l", "-e", "helper", "."]}
+  ],
+  "corpus_semantic": [
+    "parse Rust expressions",
+    "emit compiler error diagnostics",
+    "validate command line options",
+    "resolve module imports"
+  ],
+  "corpus_text": [
+    {"id": "absent-literal", "args": ["-l", "-F", "-e", "WgReleaseAbsentSentinelC903x", "."]},
+    {"id": "identifier", "args": ["-l", "-F", "-e", "parse_expr", "."]},
+    {"id": "broad", "args": ["-l", "-F", "-e", "fn", "."]},
+    {"id": "regex", "args": ["-l", "-e", "\\bpub\\s+fn\\b", "."]}
+  ],
+  "visibility_query": {"query": "BenchToggleAaa00", "alternate": "BenchToggleBbb11"}
+}

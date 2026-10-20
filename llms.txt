@@ -1,0 +1,37 @@
+# wg
+
+> One local front door for semantic code search and ripgrep-compatible
+> filesystem search, backed by one shared daemon.
+
+## Install from source
+
+cargo install --locked --path crates/wgrep-sgrep-core --bin wg
+
+Requirements: Rust 1.90+, ripgrep (`rg`) on PATH, network on the first run
+(about 33.5 MB for the code model, plus parser assets).
+
+## Docs
+
+- README: README.md
+- Agent guide: docs/agent-guide.md
+- Benchmarks: docs/benchmarks.md
+
+## Commands
+
+- wg up [PATH] [--model auto|code|text] [--json]
+- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain]
+- wg [RIPGREP-FLAGS] PATTERN [PATH...]
+- wg status [--json]
+- wg down
+
+## Contract
+
+- Default route is sgrep-compatible semantic ranking. `--top N` / `-k N` sets
+  the count (1..=100, default 5). `-n` means ripgrep line numbers.
+- A ripgrep flag (`-F`, `-e`, `-n`, `-l`, `-g`, `--files`) selects exact
+  filesystem search through an authoritative `rg` child in the same daemon.
+- `--json` alone is semantic JSON. `--json` with ripgrep flags is ripgrep JSON.
+- One daemon PID and one shared model pool serve every attached repository.
+- Semantic scope is one whole attached repository. File or subdirectory semantic
+  scope returns an explicit error.
+- Exit codes: 0 matches, 1 no matches, 2 error.

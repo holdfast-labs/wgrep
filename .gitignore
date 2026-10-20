@@ -1,0 +1,8 @@
+/target/
+/vendor/notify/target/
+/.notes/
+__pycache__/
+*.pyc
+*.log
+*.pdb
+/AGENTS.md

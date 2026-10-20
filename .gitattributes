@@ -1,0 +1,6 @@
+* text=auto
+*.sh text eol=lf
+*.tape text eol=lf
+*.gif binary
+*.mp4 binary
+*.png binary

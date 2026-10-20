@@ -1,0 +1,18 @@
+{
+  "schema": "wgrep-sgrep-small-parity-v1",
+  "languages": ["cpp", "go", "java", "python", "rust", "typescript"],
+  "queries": [
+    {"id":"cpp-symbol","language":"cpp","path":"cpp/ledger.cpp","sha256":"557c0f460ef19f53b9c66f2844950c8577702f7cc0df7a7136721456a301f413","query":"decodeAuroraFrameV17 CRC32C"},
+    {"id":"cpp-natural","language":"cpp","path":"cpp/ledger.cpp","sha256":"557c0f460ef19f53b9c66f2844950c8577702f7cc0df7a7136721456a301f413","query":"Where does the reader reject a frame with an invalid checksum?"},
+    {"id":"go-symbol","language":"go","path":"go/ledger.go","sha256":"baf94ffe9a2ab30f652336b4aac5e3129d64b485a2d5539da8610a0d9c9fd1f4","query":"DecodeAuroraFrameV17 CRC32C"},
+    {"id":"go-natural","language":"go","path":"go/ledger.go","sha256":"baf94ffe9a2ab30f652336b4aac5e3129d64b485a2d5539da8610a0d9c9fd1f4","query":"Where does the reader reject a frame with an invalid checksum?"},
+    {"id":"java-symbol","language":"java","path":"java/LedgerReader.java","sha256":"a767cbf34b1a4b186685d53164bf1ae311b505b33b8277d3a5981f54acc787c2","query":"decodeAuroraFrameV17 CRC32C"},
+    {"id":"java-natural","language":"java","path":"java/LedgerReader.java","sha256":"a767cbf34b1a4b186685d53164bf1ae311b505b33b8277d3a5981f54acc787c2","query":"Where does the reader reject a frame with an invalid checksum?"},
+    {"id":"python-symbol","language":"python","path":"python/ledger.py","sha256":"568cb17fd989196e8382caabd4674c57168accb5087f84c28f9eeadeecaf6560","query":"decode_aurora_frame_v17 CRC32C"},
+    {"id":"python-natural","language":"python","path":"python/ledger.py","sha256":"568cb17fd989196e8382caabd4674c57168accb5087f84c28f9eeadeecaf6560","query":"Where does the reader reject a frame with an invalid checksum?"},
+    {"id":"rust-symbol","language":"rust","path":"rust/ledger.rs","sha256":"11a4ce1d3fc9c96ef127f23945721e77091852e4bb6869f0fcf15f2239fc3f66","query":"decode_aurora_frame_v17 CRC32C"},
+    {"id":"rust-natural","language":"rust","path":"rust/ledger.rs","sha256":"11a4ce1d3fc9c96ef127f23945721e77091852e4bb6869f0fcf15f2239fc3f66","query":"Where does the reader reject a frame with an invalid checksum?"},
+    {"id":"typescript-symbol","language":"typescript","path":"typescript/ledger.ts","sha256":"0ed5d2d39feae7428379613358ff77a64b733f45c180949596b19643a19493c0","query":"decodeAuroraFrameV17 CRC32C"},
+    {"id":"typescript-natural","language":"typescript","path":"typescript/ledger.ts","sha256":"0ed5d2d39feae7428379613358ff77a64b733f45c180949596b19643a19493c0","query":"Where does the reader reject a frame with an invalid checksum?"}
+  ]
+}
