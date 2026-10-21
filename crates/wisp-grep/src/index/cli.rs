@@ -1,4 +1,4 @@
-//! Index and daemon management: `wgrep --start [PATH]`, `wgrep --stop [PATH]`,
+﻿//! Index and daemon management: `wgrep --start [PATH]`, `wgrep --stop [PATH]`,
 //! `wgrep --index-build [PATH]...`, `wgrep --index-status [PATH]...`,
 //! `wgrep --index-stats [PATH]` and `wgrep --index-serve [PATH]` (the daemon
 //! itself, run in the foreground).
@@ -148,16 +148,12 @@ pub(crate) fn ensure_serving(root: &Path) -> bool {
 fn spawn_serve(root: &Path) -> anyhow::Result<()> {
     let slot = store::slot_for(root).ok_or_else(|| anyhow::anyhow!("no index directory; set WGREP_INDEX_DIR"))?;
     std::fs::create_dir_all(&slot)?;
-    let log = std::fs::File::create(slot.join("daemon.log"))?;
-    let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("--index-serve")
-        .arg(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    detach(&mut command);
-    let mut child = command.spawn()?;
+    let log_path = slot.join("daemon.log");
+    let args = vec![
+        std::ffi::OsString::from("--index-serve"),
+        root.as_os_str().to_os_string(),
+    ];
+    let mut child = crate::detached::spawn(&std::env::current_exe()?, &args, &log_path)?;
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
@@ -182,16 +178,11 @@ fn start(path: &OsString) -> anyhow::Result<()> {
     let slot = store::slot_for(&root).ok_or_else(|| anyhow::anyhow!("no index directory; set WGREP_INDEX_DIR"))?;
     std::fs::create_dir_all(&slot)?;
     let log_path = slot.join("daemon.log");
-    let log = std::fs::File::create(&log_path)?;
-    let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("--index-serve")
-        .arg(&root)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    detach(&mut command);
-    let mut child = command.spawn()?;
+    let args = vec![
+        std::ffi::OsString::from("--index-serve"),
+        root.as_os_str().to_os_string(),
+    ];
+    let mut child = crate::detached::spawn(&std::env::current_exe()?, &args, &log_path)?;
     // The first start of a large tree includes its index build.
     let deadline = Instant::now() + Duration::from_secs(600);
     while Instant::now() < deadline {
@@ -211,46 +202,6 @@ fn start(path: &OsString) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(200));
     }
     anyhow::bail!("daemon did not become ready; see {}", log_path.display())
-}
-
-/// Lets the daemon outlive the terminal or agent session that started it.
-fn detach(command: &mut std::process::Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-
-        // Windows children inherit every inheritable handle, not only their
-        // stdio. If `wgrep --start` runs inside a pipeline, the daemon would
-        // hold the pipe open forever and the reader would never see EOF. The
-        // launcher exits right after the spawn, so it can stop sharing its
-        // own standard handles.
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
-            fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
-        }
-        const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
-        // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE.
-        for which in [-10i32, -11, -12] {
-            // SAFETY: GetStdHandle has no preconditions; SetHandleInformation
-            // only changes the inherit flag and fails harmlessly on an invalid
-            // or absent handle.
-            unsafe {
-                let handle = GetStdHandle(which as u32);
-                if !handle.is_null() && handle as isize != -1 {
-                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-                }
-            }
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
 }
 
 /// Prints the serving daemon's `stats` (full-walk counters by cause, queue

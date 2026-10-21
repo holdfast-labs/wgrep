@@ -720,6 +720,99 @@ impl HiArgs {
         crate::index::prune::Pruner::new(&self.patterns.patterns, &opts, &self.paths.paths, &self.cwd)
     }
 
+    /// wgrep: the pruning plan an embedded `wg` service needs for this search.
+    ///
+    /// `Prunable` names every directory search path and its encoded trigram
+    /// query. Anything that changes the file set (globs, hidden, follow, an
+    /// explicit file, a non-matching mode, ...) yields `Full`, so the caller
+    /// walks authoritatively.
+    pub(crate) fn text_plan(&self) -> crate::text::TextPlan {
+        let full = |reason: &str| crate::text::TextPlan {
+            prunable: false,
+            items: Vec::new(),
+            reason: Some(reason.to_owned()),
+        };
+        if !self.walk_default {
+            return full("not_walk_default");
+        }
+        let Some(opts) = self.index_plan_options() else { return full("plan_disabled") };
+        if std::env::var_os("WGREP_NO_INDEX").is_some() {
+            return full("index_disabled");
+        }
+        let query = crate::index::plan::plan(&self.patterns.patterns, &opts);
+        let encoded = crate::index::plan::encode(&query);
+        let mut items = Vec::with_capacity(self.paths.paths.len());
+        for (arg_index, arg) in self.paths.paths.iter().enumerate() {
+            if !arg.is_dir() {
+                return full("not_a_directory");
+            }
+            // The plan crosses the service as JSON, which cannot carry a
+            // non-UTF-8 path. Walk instead; do not lose or mangle the path.
+            if arg.to_str().is_none() || self.cwd.to_str().is_none() {
+                return full("path_not_utf8");
+            }
+            let absolute = crate::index::store::absolute(arg, &self.cwd);
+            let absolute = absolute.canonicalize().unwrap_or(absolute);
+            items.push(crate::text::TextPlanItem { arg_index, absolute, query: encoded.clone() });
+        }
+        crate::text::TextPlan { prunable: true, items, reason: None }
+    }
+
+    /// wgrep: haystacks built from candidate paths an embedded `wg` service
+    /// returned. Every search path must have exactly one group, and every
+    /// group path must be a plain relative path. Anything unexpected returns
+    /// `None`, so the caller walks authoritatively.
+    pub(crate) fn index_external_haystacks(
+        &self,
+        groups: &[crate::text::TextGroup],
+    ) -> Option<crate::index::client::DaemonSearch<Haystack>> {
+        if !self.walk_default || self.index_plan_options().is_none() {
+            return None;
+        }
+        if groups.len() != self.paths.paths.len() {
+            return None;
+        }
+        let builder = self.haystack_builder();
+        let sort_paths = matches!(
+            self.sort,
+            Some(SortMode { reverse: false, kind: SortModeKind::Path })
+        );
+        let mut haystacks = Vec::new();
+        let mut any_files = false;
+        let mut files = 0usize;
+        let mut candidates = 0usize;
+        for (arg_index, arg) in self.paths.paths.iter().enumerate() {
+            let group = &groups[arg_index];
+            if group.arg_index != arg_index || !arg.is_dir() {
+                return None;
+            }
+            any_files |= group.files > 0;
+            files += group.files;
+            candidates += group.paths.len();
+            let mut paths = group.paths.clone();
+            if sort_paths {
+                paths.sort_by(|a, b| walk_order(a, b));
+            }
+            let native = std::path::MAIN_SEPARATOR != '/';
+            for rel in paths {
+                let plain = std::path::Path::new(&rel);
+                if plain.is_absolute()
+                    || plain
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return None;
+                }
+                let rel = if native { rel.replace('/', std::path::MAIN_SEPARATOR_STR) } else { rel };
+                haystacks.push(builder.build_indexed(arg.join(rel)));
+            }
+        }
+        crate::index::profile::mark("haystacks_built");
+        crate::index::profile::set("files", serde_json::json!(files));
+        crate::index::profile::set("candidates", serde_json::json!(candidates));
+        Some(crate::index::client::DaemonSearch { haystacks, any_files, threads: None, leases: Vec::new() })
+    }
+
     /// wgrep: the search paths and working directory, for index builds.
     pub(crate) fn index_paths(&self) -> (&[PathBuf], &Path) {
         (&self.paths.paths, &self.cwd)

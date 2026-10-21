@@ -1,0 +1,1952 @@
+{
+  "phase": "B2",
+  "status": "final",
+  "generated_utc": "2026-10-21T19:47:16Z",
+  "snapshot": {
+    "source": {
+      "sha256": "7808e65148e1d2e05a4ddadc2444f11b86eca4729968559da7c26e8e1d52e0f2",
+      "components": {
+        "src": {
+          "sha256": "bda57f973d0063b1d5f17469b5fd7ac907da04ea5c989e2a1b556584fb97b4b4",
+          "files": 14
+        },
+        "crates/wisp-grep/src": {
+          "sha256": "e7d2af85f707dabbb5a7eb6cb490868a7f625e6f7f2e741d4c7906814cf126eb",
+          "files": 57
+        },
+        "Cargo.lock": {
+          "sha256": "1bab0df87703116c54dab1c75d26fd22359d1c204a46955bc90bec75deb4db67",
+          "files": 1
+        }
+      }
+    },
+    "wg_sha256": "b4e5655aa7aa8b12b2ebfd2424b9a0a9fcb35b573a8520cca496b69b54233817",
+    "rg": "/srv/workspaces/wispd/tools/rg-15/rg",
+    "rg_version": "ripgrep 15.1.0 (rev af60c2de9d)",
+    "model": "code",
+    "machine": {
+      "hostname": "v2202610434069536057",
+      "platform": "linux",
+      "cpu_count": 4,
+      "mem_total_kb": 8138024
+    },
+    "repo_copy": "/srv/projects/wispd/wg-b2-20261021-final"
+  },
+  "parity_daemon": {
+    "applicable": 1822,
+    "pruned_daemon": 1169,
+    "fallback_walk": 653,
+    "fallback_reasons": {
+      "not_walk_default": 369,
+      "plan_disabled": 252,
+      "not_a_directory": 32
+    },
+    "mismatched": 0,
+    "inconclusive": 0,
+    "stale_immediate": 0,
+    "event_missing": 0,
+    "event_count_not_one": 0,
+    "errors": 0,
+    "by_group": {
+      "--binary": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--column": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--count-matches": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--crlf": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--hidden": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--include-zero-c": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--json": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--max-depth2": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--no-ignore": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--no-unicode": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--null-data": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--passthru": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "--stats": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-A2": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-B1": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-C1": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-E_utf16le": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-F": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-L": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-N": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-P": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-S": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-U": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-U-dotall": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-a": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-c": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-e_multi": {
+        "daemon": 3,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-f_patternfile": {
+        "daemon": 1,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-g_md": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-g_not_rs": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-i": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-l": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-m3": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-n": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-o": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-s": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-t_md": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-t_rust": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-uu": {
+        "daemon": 0,
+        "walk": 41,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-v": {
+        "daemon": 0,
+        "walk": 6,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-w": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "-x": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "default": {
+        "daemon": 41,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "freshness": {
+        "daemon": 108,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_explicit_-c": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_explicit_-i": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_explicit_-l": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_explicit_default": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_implicit_-c": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_implicit_-i": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_implicit_-l": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_implicit_default": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_multi_-c": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_multi_-i": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_multi_-l": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_multi_default": {
+        "daemon": 0,
+        "walk": 4,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_subdir_-c": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_subdir_-i": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_subdir_-l": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      },
+      "path_subdir_default": {
+        "daemon": 4,
+        "walk": 0,
+        "missing": 0,
+        "mismatched": 0
+      }
+    },
+    "elapsed_s": 117.3,
+    "startup": {
+      "build_ms": 666,
+      "model_ms": 257,
+      "ok": true,
+      "pid": 345287,
+      "root": {
+        "chunks": 90,
+        "error": null,
+        "files": 75,
+        "generation": 1,
+        "path": "/srv/workspaces/wispd/wg-b2-final/parity2/fixture",
+        "pending": 0,
+        "ready": true,
+        "text": {
+          "added": 0,
+          "build_ms": 19,
+          "built": true,
+          "dirty": 0,
+          "disk_bytes": 42712,
+          "files": 75,
+          "index_path": "/srv/workspaces/wispd/wg-b2-final/parity2/daemon-text-index/a38db1e83c659b47/index-1.wgi",
+          "needs_rescan": true,
+          "ready": true,
+          "resident_bytes": 45056,
+          "resident_estimated": false,
+          "root": "/srv/workspaces/wispd/wg-b2-final/parity2/fixture",
+          "unprunable": false,
+          "untrusted": false,
+          "walks": {
+            "outside_dep": 0,
+            "overflow": 0,
+            "pending_retry": 0,
+            "rebuild": 0,
+            "scoped": 0,
+            "startup": 0
+          }
+        },
+        "text_build_ms": 19,
+        "text_error": null
+      },
+      "text_build_ms": 19,
+      "text_error": null,
+      "total_ms": 1049,
+      "text_files": 75
+    },
+    "work": "/srv/workspaces/wispd/wg-b2-final/parity2"
+  },
+  "freshness": {
+    "checks": 26,
+    "matched": 26,
+    "stale_first": 0,
+    "mismatched": 0,
+    "daemon": 26,
+    "fallback_walk": 0,
+    "event_missing": 0,
+    "event_count_not_one": 0,
+    "fallback_reasons": {},
+    "settle_s": 3.0,
+    "elapsed_s": 1.4,
+    "records": [
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/baseline_absent",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/create",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_a_4411",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/append",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_a_4411"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_b_5522",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/samelen_restored_mtime",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_b_5522"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "forest",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/samelen_remove_match",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "forest"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_a_4411",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/rename",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_a_4411"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_a_4411",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/delete",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_a_4411"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_c_6633",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/racy_baseline",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_c_6633"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_edit_c_6633",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "file/racy_append",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/fixture",
+        "pattern": "zzfreshtoken_edit_c_6633"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/root_gitignore/with_ignore",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/root_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/root_gitignore/remove",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/root_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/root_gitignore/add_back",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/root_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_ignore/with_ignore",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_ignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_ignore/remove",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_ignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_ignore/add_back",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_ignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_gitignore/with_ignore",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_gitignore/remove",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/ancestor_gitignore/add_back",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/ancestor_gitignore/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/git_info_exclude/with_ignore",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/git_info_exclude/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/git_info_exclude/remove",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/git_info_exclude/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/git_info_exclude/add_back",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/git_info_exclude/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/nested_git_pointer/with_ignore",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/nested_git_pointer/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/nested_git_pointer/remove",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/nested_git_pointer/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/nested_git_pointer/add_back",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/nested_git_pointer/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/nested_git_pointer/pointer_removed",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/nested_git_pointer/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      },
+      {
+        "args": [
+          "-n",
+          "--sort",
+          "path",
+          "--color",
+          "never",
+          "--",
+          "zzfreshtoken_needle_9182",
+          "."
+        ],
+        "matched": true,
+        "stale_first": false,
+        "hard_mismatch": false,
+        "comparison": null,
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "label": "ignore/nested_git_pointer/pointer_created",
+        "root": "/srv/workspaces/wispd/wg-b2-final/freshness/ignore/nested_git_pointer/parent/tree",
+        "pattern": "zzfreshtoken_needle_9182"
+      }
+    ],
+    "work": "/srv/workspaces/wispd/wg-b2-final/freshness"
+  },
+  "speed": {
+    "corpus": "/srv/workspaces/wispd/wg-b2-final/speed/corpus",
+    "source_corpus": "/srv/workspaces/wispd/prof/src",
+    "corpus_stats": {
+      "files": 13448,
+      "bytes": 148775301
+    },
+    "query_selection": {
+      "rare": "testable",
+      "common": "not",
+      "absent": "zzqxjwvbnm_wg_text_absent_zzz",
+      "rare_candidates": {
+        "official": 48,
+        "tokenize": 35,
+        "fnptrtype": 0,
+        "elaborate": 37,
+        "mytuplevariant": 0,
+        "eventually": 57,
+        "liveness": 11,
+        "hasloopbody": 0,
+        "testable": 10,
+        "discussing": 22,
+        "institute": 11,
+        "binutils": 19
+      },
+      "common_candidates": {
+        "some": 3086,
+        "with": 5329,
+        "type": 3562,
+        "crate": 2893,
+        "this": 4479,
+        "into": 2303,
+        "std": 4518,
+        "not": 6414
+      },
+      "sampled_files": 400
+    },
+    "queries": [
+      {
+        "name": "absent_literal",
+        "pattern": "zzqxjwvbnm_wg_text_absent_zzz",
+        "args": [
+          "-F",
+          "--",
+          "zzqxjwvbnm_wg_text_absent_zzz",
+          "."
+        ],
+        "rg_samples_ms": [
+          64.29773999843746,
+          64.43299900274724,
+          64.22343599842861,
+          115.32988597173244,
+          117.74327204329893,
+          66.30688800942153,
+          64.42112597869709,
+          64.29360201582313,
+          64.97534300433472,
+          114.58491202211007,
+          64.43673599278554,
+          64.067184983287,
+          64.48692397680134,
+          65.15536998631433,
+          64.13014797726646,
+          63.985328015405685,
+          64.22736402601004,
+          64.3488880014047,
+          65.15788502292708,
+          63.943437999114394,
+          66.0060279769823,
+          64.09947795327753,
+          64.65248204767704,
+          64.59916901076213,
+          64.68976498581469,
+          65.18979498650879,
+          65.23453298723325,
+          64.51258197193965,
+          64.52846399042755,
+          64.17843903182074
+        ],
+        "wg_samples_ms": [
+          15.97663201391697,
+          7.834860996808857,
+          7.758985040709376,
+          7.678228022996336,
+          8.014667022507638,
+          7.796075020451099,
+          7.888413034379482,
+          4.150457971263677,
+          7.7979599591344595,
+          7.761748973280191,
+          8.244980010204017,
+          7.774225028697401,
+          7.751360011752695,
+          7.57248600712046,
+          7.763963949400932,
+          7.63450498925522,
+          7.930173014756292,
+          7.753143960144371,
+          8.004937961231917,
+          7.524232962168753,
+          7.730010023806244,
+          7.599527016282082,
+          7.795524026732892,
+          7.800945022609085,
+          7.973638013936579,
+          7.68277799943462,
+          7.761669054161757,
+          7.640858006197959,
+          7.705139985773712,
+          3.567877982277423
+        ],
+        "rg_p50_ms": 64.48692397680134,
+        "rg_p95_ms": 115.32988597173244,
+        "wg_p50_ms": 7.761669054161757,
+        "wg_p95_ms": 8.244980010204017,
+        "ratio_p50": 0.12036035486750704,
+        "errors": [],
+        "n": {
+          "rg": 30,
+          "wg": 30
+        }
+      },
+      {
+        "name": "rare_identifier",
+        "pattern": "testable",
+        "args": [
+          "-F",
+          "--",
+          "testable",
+          "."
+        ],
+        "rg_samples_ms": [
+          64.15460398420691,
+          64.13729098858312,
+          65.14538096962497,
+          64.17540402617306,
+          64.14177903207019,
+          64.55605704104528,
+          66.00376399001107,
+          64.9103979812935,
+          64.18352003674954,
+          64.16326999897137,
+          64.5055000204593,
+          64.36480797128752,
+          64.98109502717853,
+          64.00487601058558,
+          64.35352802509442,
+          64.27614903077483,
+          64.30492404615507,
+          65.0135480100289,
+          65.11040398618206,
+          66.12582801608369,
+          64.44255803944543,
+          64.37271303730085,
+          64.47520101210102,
+          64.3333179759793,
+          64.45978203555569,
+          64.03771898476407,
+          64.20667300699279,
+          64.73645399091765,
+          66.2195979966782,
+          64.44908998673782
+        ],
+        "wg_samples_ms": [
+          7.759867003187537,
+          7.8150019980967045,
+          15.900194994173944,
+          15.807054995093495,
+          7.758573978208005,
+          7.7573900343850255,
+          7.8370540286414325,
+          15.745848009828478,
+          15.857491991482675,
+          7.594146998599172,
+          7.765577000100166,
+          7.690592959988862,
+          9.669179969932884,
+          15.802206005901098,
+          7.736891973763704,
+          15.784250979777426,
+          8.373145014047623,
+          15.97084099194035,
+          9.340768971014768,
+          7.612893998157233,
+          15.793360013049096,
+          15.851652016863227,
+          15.787466953042895,
+          15.84535901201889,
+          9.567626984789968,
+          16.027158999349922,
+          16.21565205277875,
+          15.988925006240606,
+          8.124808024149388,
+          8.261701965238899
+        ],
+        "rg_p50_ms": 64.37271303730085,
+        "rg_p95_ms": 66.12582801608369,
+        "wg_p50_ms": 9.567626984789968,
+        "wg_p95_ms": 16.027158999349922,
+        "ratio_p50": 0.14862861192825588,
+        "errors": [],
+        "n": {
+          "rg": 30,
+          "wg": 30
+        }
+      },
+      {
+        "name": "common_identifier",
+        "pattern": "not",
+        "args": [
+          "-F",
+          "--",
+          "not",
+          "."
+        ],
+        "rg_samples_ms": [
+          65.09532500058413,
+          114.73208601819351,
+          114.7678549750708,
+          114.65365398908034,
+          114.93952397722751,
+          114.55913202371448,
+          116.58759595593438,
+          115.6868030084297,
+          114.6777700050734,
+          114.56869001267478,
+          116.7575130239129,
+          114.9721970432438,
+          114.479488984216,
+          114.82257902389392,
+          115.11420999886468,
+          116.55835004057735,
+          114.35767397051677,
+          114.49980799807236,
+          64.34483005432412,
+          114.44950097939,
+          115.47703901305795,
+          114.68192900065333,
+          115.93787698075175,
+          115.16392696648836,
+          114.43837999831885,
+          116.33886798517779,
+          114.4655819516629,
+          115.94727501505986,
+          115.8320220420137,
+          114.86213398166001
+        ],
+        "wg_samples_ms": [
+          64.06808801693842,
+          66.32011197507381,
+          66.70880998717621,
+          64.4787879427895,
+          67.09179695462808,
+          68.23677197098732,
+          68.7855280120857,
+          68.03577399114147,
+          67.73812096798792,
+          64.29029599530622,
+          64.21884801238775,
+          65.80705498345196,
+          66.55049504479393,
+          71.96786400163546,
+          66.03072502184659,
+          67.98969599185511,
+          64.2398870550096,
+          64.22113202279434,
+          64.22459799796343,
+          65.38959097815678,
+          64.26776200532913,
+          65.75397297274321,
+          65.33713999669999,
+          66.09172298340127,
+          66.35483901482075,
+          65.84302301052958,
+          64.28568699629977,
+          64.23828599508852,
+          64.2372330185026,
+          64.2155819805339
+        ],
+        "rg_p50_ms": 114.7678549750708,
+        "rg_p95_ms": 116.58759595593438,
+        "wg_p50_ms": 65.75397297274321,
+        "wg_p95_ms": 68.7855280120857,
+        "ratio_p50": 0.5729302249922323,
+        "errors": [],
+        "n": {
+          "rg": 30,
+          "wg": 30
+        }
+      },
+      {
+        "name": "broad_regex",
+        "pattern": "\\w+\\(",
+        "args": [
+          "-n",
+          "--",
+          "\\w+\\(",
+          "."
+        ],
+        "rg_samples_ms": [
+          164.90683099254966,
+          170.0450400239788,
+          164.80954200960696,
+          168.87182201026008,
+          164.96396099682897,
+          165.11989099672064,
+          165.79454997554421,
+          114.8020809632726,
+          165.18958599772304,
+          165.0034770136699,
+          164.5127619849518,
+          164.48538895929232,
+          167.53606201382354,
+          114.70102402381599,
+          114.86630403669551,
+          116.47177301347256,
+          164.65243103448302,
+          164.82774796895683,
+          165.0896220235154,
+          115.55502901319414,
+          114.50668197358027,
+          114.59379899315536,
+          114.2014330253005,
+          165.49242002656683,
+          167.44609898887575,
+          165.2780640288256,
+          164.9518379708752,
+          120.30306801898405,
+          166.17702500661835,
+          114.77228300645947
+        ],
+        "wg_samples_ms": [
+          114.49100100435317,
+          120.8532570162788,
+          165.60098703484982,
+          164.58979999879375,
+          116.96854897309095,
+          171.23677401104942,
+          117.79029096942395,
+          114.18204597430304,
+          117.62063397327438,
+          114.28491404512897,
+          120.27794902678579,
+          114.1935380292125,
+          117.69992701010779,
+          114.26640796707943,
+          114.46911899838597,
+          115.83392601460218,
+          120.62728096498176,
+          118.21065103868023,
+          114.19760598801076,
+          121.4589630253613,
+          114.16149698197842,
+          118.0585470283404,
+          115.15341600170359,
+          117.21648799721152,
+          115.86404399713501,
+          119.66488003963605,
+          164.4668950466439,
+          116.94872099906206,
+          117.7536099567078,
+          121.99510500067845
+        ],
+        "rg_p50_ms": 164.82774796895683,
+        "rg_p95_ms": 168.87182201026008,
+        "wg_p50_ms": 117.62063397327438,
+        "wg_p95_ms": 165.60098703484982,
+        "ratio_p50": 0.7135972882152506,
+        "errors": [],
+        "n": {
+          "rg": 30,
+          "wg": 30
+        }
+      },
+      {
+        "name": "case_insensitive",
+        "pattern": "error",
+        "args": [
+          "-i",
+          "-F",
+          "--",
+          "error",
+          "."
+        ],
+        "rg_samples_ms": [
+          114.40574802691117,
+          117.13222495745867,
+          68.16078699193895,
+          114.510117971804,
+          115.15162204159424,
+          114.93787198560312,
+          114.73224504152313,
+          115.1699890033342,
+          114.93127897847444,
+          114.48335699969903,
+          119.29179198341444,
+          115.37064402364194,
+          114.7080379887484,
+          114.3793860101141,
+          64.36769501306117,
+          115.53895799443126,
+          64.33899799594656,
+          116.02554499404505,
+          115.05582695826888,
+          116.50706100044772,
+          114.61274500470608,
+          115.3848419780843,
+          64.28737996611744,
+          65.46713999705389,
+          65.15563098946586,
+          114.97098504332826,
+          114.99195598298684,
+          117.33006505528465,
+          114.49466802878305,
+          114.47800602763891
+        ],
+        "wg_samples_ms": [
+          67.3348149866797,
+          66.50757399620488,
+          33.705966954585165,
+          64.94525499874726,
+          35.5855249799788,
+          68.12562700361013,
+          66.12417404539883,
+          68.0728160077706,
+          66.95192801998928,
+          67.00903800083324,
+          32.04364702105522,
+          31.99713898357004,
+          64.10117103951052,
+          64.2835219623521,
+          64.06711600720882,
+          66.59761699847877,
+          32.04116300912574,
+          64.07064199447632,
+          34.68742599943653,
+          64.18488203780726,
+          36.619113001506776,
+          64.16557502234355,
+          31.994302000384778,
+          64.1399149899371,
+          33.50778599269688,
+          33.84514502249658,
+          66.13126903539523,
+          64.11948503227904,
+          64.15081600425765,
+          65.79362897900864
+        ],
+        "rg_p50_ms": 114.73224504152313,
+        "rg_p95_ms": 117.33006505528465,
+        "wg_p50_ms": 64.1399149899371,
+        "wg_p95_ms": 68.0728160077706,
+        "ratio_p50": 0.5590400062922504,
+        "errors": [],
+        "n": {
+          "rg": 30,
+          "wg": 30
+        }
+      }
+    ],
+    "parity": [
+      {
+        "name": "absent_literal",
+        "exact": true,
+        "rg_code": 1,
+        "wg_code": 1,
+        "rg_bytes": 0,
+        "wg_bytes": 0,
+        "rg_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "wg_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "errors": []
+      },
+      {
+        "name": "rare_identifier",
+        "exact": true,
+        "rg_code": 0,
+        "wg_code": 0,
+        "rg_bytes": 2395,
+        "wg_bytes": 2395,
+        "rg_sha256": "bb78fe9932fab9d8947b74b16bba38723fa8e64579a3a89115dec5ed7cf144d5",
+        "wg_sha256": "bb78fe9932fab9d8947b74b16bba38723fa8e64579a3a89115dec5ed7cf144d5",
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "errors": []
+      },
+      {
+        "name": "common_identifier",
+        "exact": true,
+        "rg_code": 0,
+        "wg_code": 0,
+        "rg_bytes": 5409230,
+        "wg_bytes": 5409230,
+        "rg_sha256": "557bc28f82905bbbcd7bb050cdb794f193157c9d55b2f8b5945d0fa5915e825a",
+        "wg_sha256": "557bc28f82905bbbcd7bb050cdb794f193157c9d55b2f8b5945d0fa5915e825a",
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "errors": []
+      },
+      {
+        "name": "broad_regex",
+        "exact": true,
+        "rg_code": 0,
+        "wg_code": 0,
+        "rg_bytes": 45695272,
+        "wg_bytes": 45695272,
+        "rg_sha256": "64c1e58f91c0cfaff0bcf451a22e9f14d1e76ca7dae111ce5e3b2adbe1ea0357",
+        "wg_sha256": "64c1e58f91c0cfaff0bcf451a22e9f14d1e76ca7dae111ce5e3b2adbe1ea0357",
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "errors": []
+      },
+      {
+        "name": "case_insensitive",
+        "exact": true,
+        "rg_code": 0,
+        "wg_code": 0,
+        "rg_bytes": 5321683,
+        "wg_bytes": 5321683,
+        "rg_sha256": "48b77d4d8e40dca1d5902708476c2f060f43774715023bd3b7f769fec1333e28",
+        "wg_sha256": "48b77d4d8e40dca1d5902708476c2f060f43774715023bd3b7f769fec1333e28",
+        "used": "daemon",
+        "reason": null,
+        "event_count": 1,
+        "errors": []
+      }
+    ],
+    "concurrency": [
+      {
+        "clients": 1,
+        "tool": "wg",
+        "queries_per_s": 17.457871262581527,
+        "p50_ms": 65.28166346834041,
+        "p95_ms": 142.15220298501663,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 1,
+        "tool": "rg",
+        "queries_per_s": 9.728449066579156,
+        "p50_ms": 115.70904601830989,
+        "p95_ms": 165.24956549983472,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 4,
+        "tool": "wg",
+        "queries_per_s": 31.41121843670686,
+        "p50_ms": 92.57360003539361,
+        "p95_ms": 328.09363151318394,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 4,
+        "tool": "rg",
+        "queries_per_s": 16.63424100725713,
+        "p50_ms": 180.64591553411447,
+        "p95_ms": 383.8183194748126,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 16,
+        "tool": "wg",
+        "queries_per_s": 31.297888985512436,
+        "p50_ms": 331.9048920238856,
+        "p95_ms": 1462.3644824896473,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 16,
+        "tool": "rg",
+        "queries_per_s": 17.183528398400263,
+        "p50_ms": 723.4002189943567,
+        "p95_ms": 1736.1071560007986,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 32,
+        "tool": "wg",
+        "queries_per_s": 31.319629014276693,
+        "p50_ms": 480.9093494841363,
+        "p95_ms": 2940.387593000196,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      },
+      {
+        "clients": 32,
+        "tool": "rg",
+        "queries_per_s": 17.01201598097778,
+        "p50_ms": 1446.1489880050067,
+        "p95_ms": 3529.0437075018417,
+        "errors": 0,
+        "reps": 2,
+        "per_client": 4
+      }
+    ],
+    "rss": [
+      {
+        "label": "with_text",
+        "pid": 350257,
+        "idle_rss_mib": 500.84765625,
+        "idle_pss_mib": 499.1455078125,
+        "loaded_rss_mib": 500.84765625,
+        "loaded_pss_mib": 499.1455078125,
+        "text_present": true,
+        "text_error": null,
+        "text_files": 13294,
+        "text_resident_mib": 3.342336,
+        "text_disk_mib": 20.41549
+      },
+      {
+        "label": "without_text",
+        "pid": 356403,
+        "idle_rss_mib": 483.3203125,
+        "idle_pss_mib": 481.732421875,
+        "loaded_rss_mib": 483.35546875,
+        "loaded_pss_mib": 481.767578125,
+        "text_present": false,
+        "text_error": "Not a directory (os error 20)",
+        "text_files": null,
+        "text_resident_mib": null,
+        "text_disk_mib": null
+      }
+    ],
+    "startup": {
+      "pid": 350257,
+      "files": 13337,
+      "chunks": 63801,
+      "text": {
+        "added": 0,
+        "build_ms": 1389,
+        "built": true,
+        "dirty": 0,
+        "disk_bytes": 20415490,
+        "files": 13294,
+        "index_path": "/srv/workspaces/wispd/wg-b2-final/speed/with-text-text-index/e5c0cb4e5429ef6c/index-1.wgi",
+        "needs_rescan": true,
+        "ready": true,
+        "resident_bytes": 1769472,
+        "resident_estimated": false,
+        "root": "/srv/workspaces/wispd/wg-b2-final/speed/corpus",
+        "unprunable": false,
+        "untrusted": false,
+        "walks": {
+          "outside_dep": 0,
+          "overflow": 0,
+          "pending_retry": 0,
+          "rebuild": 0,
+          "scoped": 0,
+          "startup": 0
+        }
+      },
+      "text_error": null,
+      "total_ms": 21894
+    },
+    "no_text_startup": {
+      "text_present": false,
+      "text_error": "Not a directory (os error 20)"
+    },
+    "samples": 30,
+    "elapsed_s": 119.7,
+    "teardown_with_text": {
+      "down": {
+        "code": 0,
+        "timed_out": false
+      },
+      "killed": false,
+      "alive_after": false
+    },
+    "teardown_without_text": {
+      "down": {
+        "code": 0,
+        "timed_out": false
+      },
+      "killed": false,
+      "alive_after": false
+    }
+  },
+  "inherit_fd": {
+    "pass": false,
+    "model": "text",
+    "cases": [
+      {
+        "case": "inherited_fd",
+        "pipe_inode": 4140112,
+        "up_timeout_s": 120.0,
+        "eof_wait_s": 5.0,
+        "up_exited": true,
+        "up_timed_out": false,
+        "up_elapsed_s": 0.275,
+        "up_code": 0,
+        "up_stdout": "{\"build_ms\":6,\"model_ms\":155,\"ok\":true,\"pid\":340462,\"root\":{\"chunks\":3,\"error\":null,\"files\":3,\"generation\":1,\"path\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/tree-inherit\",\"pending\":0,\"ready\":true,\"text\":{\"added\":0,\"build_ms\":3,\"built\":true,\"dirty\":0,\"disk_bytes\":283,\"files\":0,\"index_path\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/idx-inherit/40eaf598606ab377/index-1.wgi\",\"needs_rescan\":true,\"ready\":true,\"resident_bytes\":4096,\"resident_estimated\":false,\"root\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/tree-inherit\",\"unprunable\":false,\"untrusted\":false,\"walks\":{\"outside_dep\":0,\"overflow\":0,\"pending_retry\":0,\"rebuild\":0,\"scoped\":0,\"startup\":0}},\"text_build_ms\":3,\"text_error\":null},\"text_build_ms\":3,\"text_error\":null,\"total_ms\":272}\n",
+        "up_stderr": "",
+        "daemon_pid": 340462,
+        "daemon_alive_before_close": true,
+        "eof_within_wait": false,
+        "bytes_before_eof": 0,
+        "daemon_alive_after_close": true,
+        "fd_listing": "total 0\nlr-x------ 1 agent agent 64 Oct 21 21:18 0 -> /dev/null\nl-wx------ 1 agent agent 64 Oct 21 21:18 1 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-inherit/daemon.log\nl-wx------ 1 agent agent 64 Oct 21 21:18 2 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-inherit/daemon.log\nlrwx------ 1 agent agent 64 Oct 21 21:18 3 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-inherit/service.lock\nl-wx------ 1 agent agent 64 Oct 21 21:18 4 -> pipe:[4140112]\nlrwx------ 1 agent agent 64 Oct 21 21:18 5 -> socket:[4137955]\nlr-x------ 1 agent agent 64 Oct 21 21:18 7 -> anon_inode:inotify\nlrwx------ 1 agent agent 64 Oct 21 21:18 8 -> anon_inode:[eventpoll]\nlrwx------ 1 agent agent 64 Oct 21 21:18 9 -> anon_inode:[eventfd]\n",
+        "pipe_fd_in_daemon": true,
+        "pass": false,
+        "teardown": {
+          "down": {
+            "code": 0,
+            "timed_out": false
+          },
+          "killed": false,
+          "alive_after": false
+        }
+      },
+      {
+        "case": "plain_stdio",
+        "timeout_s": 120.0,
+        "up_timed_out": false,
+        "up_elapsed_s": 0.214,
+        "up_code": 0,
+        "stdout_eof": true,
+        "up_stdout": "{\"build_ms\":5,\"model_ms\":97,\"ok\":true,\"pid\":340482,\"root\":{\"chunks\":3,\"error\":null,\"files\":3,\"generation\":1,\"path\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/tree-plain\",\"pending\":0,\"ready\":true,\"text\":{\"added\":0,\"build_ms\":2,\"built\":true,\"dirty\":0,\"disk_bytes\":281,\"files\":0,\"index_path\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/idx-plain/21017e9710a3fb18/index-1.wgi\",\"needs_rescan\":true,\"ready\":true,\"resident_bytes\":4096,\"resident_estimated\":false,\"root\":\"/srv/workspaces/wispd/wg-b2-final/inherit-fd/tree-plain\",\"unprunable\":false,\"untrusted\":false,\"walks\":{\"outside_dep\":0,\"overflow\":0,\"pending_retry\":0,\"rebuild\":0,\"scoped\":0,\"startup\":0}},\"text_build_ms\":2,\"text_error\":null},\"text_build_ms\":2,\"text_error\":null,\"total_ms\":212}\n",
+        "up_stderr": "",
+        "daemon_pid": 340482,
+        "daemon_alive": true,
+        "fd_listing": "total 0\nlr-x------ 1 agent agent 64 Oct 21 21:18 0 -> /dev/null\nl-wx------ 1 agent agent 64 Oct 21 21:18 1 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-plain/daemon.log\nl-wx------ 1 agent agent 64 Oct 21 21:18 2 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-plain/daemon.log\nlrwx------ 1 agent agent 64 Oct 21 21:18 3 -> /srv/workspaces/wispd/wg-b2-final/inherit-fd/svc-plain/service.lock\nlrwx------ 1 agent agent 64 Oct 21 21:18 4 -> socket:[4142907]\nlr-x------ 1 agent agent 64 Oct 21 21:18 6 -> anon_inode:inotify\nlrwx------ 1 agent agent 64 Oct 21 21:18 7 -> anon_inode:[eventpoll]\nlrwx------ 1 agent agent 64 Oct 21 21:18 8 -> anon_inode:[eventfd]\n",
+        "pass": true,
+        "teardown": {
+          "down": {
+            "code": 0,
+            "timed_out": false
+          },
+          "killed": false,
+          "alive_after": false
+        }
+      }
+    ],
+    "elapsed_s": 5.6,
+    "work": "/srv/workspaces/wispd/wg-b2-final/inherit-fd"
+  },
+  "large_up": {
+    "model": "code",
+    "rows": [
+      {
+        "corpus": "/srv/workspaces/wispd/corpora/linux-7.2.9",
+        "name": "linux-7.2.9",
+        "tree": {
+          "files": 94862,
+          "bytes": 1617154962
+        },
+        "up_timeout_s": 300.0,
+        "ready_timeout_s": 1800.0,
+        "service_dir": "/srv/workspaces/wispd/wg-b2-final/large-up/svc-linux-7.2.9",
+        "index_dir": "/srv/workspaces/wispd/wg-b2-final/large-up/idx-linux-7.2.9",
+        "up_timed_out": false,
+        "up_elapsed_s": 90.138,
+        "up_code": 2,
+        "up_stdout": "",
+        "up_stderr": "wg: service frame deadline exceeded\n",
+        "daemon_pid": 356500,
+        "daemon_alive_after_up": true,
+        "ready": false,
+        "ready_elapsed_s": 756.501,
+        "status": null,
+        "peak_rss_mib": 7047.9,
+        "peak_pss_mib": 7047.8,
+        "rss_samples": 3444,
+        "teardown": {
+          "down": {
+            "code": 2,
+            "timed_out": false
+          },
+          "killed": false,
+          "alive_after": false
+        },
+        "daemon_log_tail": "",
+        "kernel_oom": "Out of memory: Killed process 356500 (wg) total-vm:8161748kB, anon-rss:7270048kB, file-rss:1056kB, shmem-rss:0kB, UID:1000 pgtables:14708kB oom_score_adj:0"
+      },
+      {
+        "corpus": "/srv/workspaces/wispd/prof/src",
+        "name": "src",
+        "tree": {
+          "files": 13448,
+          "bytes": 148775301
+        },
+        "up_timeout_s": 300.0,
+        "ready_timeout_s": 1800.0,
+        "service_dir": "/srv/workspaces/wispd/wg-b2-final/large-up/svc-src",
+        "index_dir": "/srv/workspaces/wispd/wg-b2-final/large-up/idx-src",
+        "up_timed_out": false,
+        "up_elapsed_s": 22.475,
+        "up_code": 0,
+        "up_stdout": "{\"build_ms\":19846,\"model_ms\":177,\"ok\":true,\"pid\":357001,\"root\":{\"chunks\":63786,\"error\":null,\"files\":13332,\"generation\":1,\"path\":\"/srv/workspaces/wispd/prof/src\",\"pending\":0,\"ready\":true,\"text\":{\"added\":0,\"build_ms\":2262,\"built\":true,\"dirty\":0,\"disk_bytes\":20405572,\"files\":13289,\"index_path\":\"/srv/workspaces/wispd/wg-b2-final/large-up/idx-src/21d170aba22f43e3/index-1.wgi\",\"needs_rescan\":true,\"ready\":true,\"resident_bytes\":1769472,\"resident_estimated\":false,\"root\":\"/srv/workspaces/wispd/prof/src\",\"unprunable\":false,\"untrusted\":false,\"walks\":{\"outside_dep\":0,\"overflow\":0,\"pending_retry\":0,\"rebuild\":0,\"scoped\":0,\"startup\":0}},\"text_build_ms\":2262,\"text_error\":null},\"text_build_ms\":2262,\"text_error\":null,\"total_ms\":22471}\n",
+        "up_stderr": "",
+        "daemon_pid": 357001,
+        "daemon_alive_after_up": true,
+        "ready": true,
+        "ready_elapsed_s": 0.009,
+        "status": {
+          "loaded_models": 1,
+          "model_loads": 1,
+          "ok": true,
+          "pid": 357001,
+          "proto": 1,
+          "roots": [
+            {
+              "chunks": 63786,
+              "error": null,
+              "files": 13332,
+              "generation": 1,
+              "path": "/srv/workspaces/wispd/prof/src",
+              "pending": 0,
+              "ready": true,
+              "text": {
+                "added": 0,
+                "build_ms": 2262,
+                "built": true,
+                "dirty": 0,
+                "disk_bytes": 20405572,
+                "files": 13289,
+                "index_path": "/srv/workspaces/wispd/wg-b2-final/large-up/idx-src/21d170aba22f43e3/index-1.wgi",
+                "needs_rescan": true,
+                "ready": true,
+                "resident_bytes": 1769472,
+                "resident_estimated": false,
+                "root": "/srv/workspaces/wispd/prof/src",
+                "unprunable": false,
+                "untrusted": false,
+                "walks": {
+                  "outside_dep": 0,
+                  "overflow": 0,
+                  "pending_retry": 0,
+                  "rebuild": 0,
+                  "scoped": 0,
+                  "startup": 0
+                }
+              },
+              "text_build_ms": 2262,
+              "text_error": null
+            }
+          ],
+          "uptime_ms": 22476
+        },
+        "root_files": 13332,
+        "root_chunks": 63786,
+        "root_ready": true,
+        "text_files": 13289,
+        "text_build_ms": 2262,
+        "text_disk_bytes": 20405572,
+        "text_resident_bytes": 1769472,
+        "text_error": null,
+        "peak_rss_mib": 681.7,
+        "peak_pss_mib": 679.0,
+        "rss_samples": 197,
+        "teardown": {
+          "down": {
+            "code": 0,
+            "timed_out": false
+          },
+          "killed": false,
+          "alive_after": false
+        },
+        "daemon_log_tail": ""
+      }
+    ],
+    "elapsed_s": 872.6,
+    "work": "/srv/workspaces/wispd/wg-b2-final/large-up"
+  },
+  "receipts": {
+    "vps_root": "/srv/workspaces/wispd/wg-b2-final",
+    "parity_json": "/srv/workspaces/wispd/wg-b2-final/parity2/summary.json",
+    "freshness_json": "/srv/workspaces/wispd/wg-b2-final/freshness/summary.json",
+    "speed_json": "/srv/workspaces/wispd/wg-b2-final/speed/results.json",
+    "inherit_fd_json": "/srv/workspaces/wispd/wg-b2-final/inherit-fd/summary.json",
+    "large_up_json": "/srv/workspaces/wispd/wg-b2-final/large-up/summary.json",
+    "build_log": "/srv/logs/wispd/wg-b2-build-final.log",
+    "parity_log": "/srv/logs/wispd/wg-b2-parity-final2.log",
+    "freshness_log": "/srv/logs/wispd/wg-b2-freshness-final.log",
+    "speed_log": "/srv/logs/wispd/wg-b2-speed-final.log",
+    "large_up_log": "/srv/logs/wispd/wg-b2-large-up.log",
+    "repo_copy": "/srv/projects/wispd/wg-b2-20261021-final"
+  },
+  "caveats": [
+    "One shared 4-vCPU Debian 13 VPS, 7.8 GiB RAM, no swap, warm page cache; one campaign.",
+    "wg up builds the semantic index too. Startup time and RSS include the semantic route.",
+    "The concurrency mix is fixed: absent, rare, common and broad regex; two reps of clients x 4 queries.",
+    "RSS is daemon VmRSS/Pss; text-index resident bytes are only the touched pages of the mapping.",
+    "Output parity uses --sort path exact bytes; unsorted ripgrep traversal order is not stable.",
+    "The Linux tree check used --model code and ran alone on the VPS."
+  ]
+}

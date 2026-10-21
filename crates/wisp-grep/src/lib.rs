@@ -18,6 +18,8 @@ mod flags;
 mod haystack;
 #[path = "index/mod.rs"]
 mod index;
+pub mod detached;
+pub mod text;
 #[path = "rg/logger.rs"]
 mod logger;
 #[path = "rg/search.rs"]
@@ -65,10 +67,63 @@ pub fn run_cli() -> ExitCode {
 /// daemon) mode. It uses the process stdin, stdout, stderr and working
 /// directory. The return value is ripgrep's exit code.
 pub fn run_rg(argv: Vec<OsString>) -> i32 {
+    index::events::set_external(false);
     index::events::set_walk_only(true);
     messages::reset_errored();
     let parsed = flags::parse_from(argv);
     exit_value(finish(parsed))
+}
+
+/// Run one vendored-ripgrep invocation, optionally replacing rg's walk with a
+/// verified candidate set supplied by a host daemon.
+///
+/// `provider` is called once after argv is parsed. `Err(reason)` (or groups
+/// that do not match the parsed search paths) makes this a normal full scan.
+/// The reason reaches the search event, so a fallback stays observable.
+/// Output and exit behavior stay ripgrep's either way.
+pub fn run_rg_text<F>(argv: Vec<OsString>, provider: F) -> i32
+where
+    F: FnOnce(&text::TextPlan) -> std::result::Result<Vec<text::TextGroup>, String>,
+{
+    // One-shot: never consult a standalone `wgrep` daemon. A host daemon's
+    // candidates arrive through `provider` instead. The host records the
+    // search outcome here, so suppress the generic walk-only event.
+    index::events::set_external(true);
+    index::events::set_walk_only(true);
+    messages::reset_errored();
+    let parsed = flags::parse_from(argv);
+    match parsed {
+        flags::ParseResult::Ok(args) => {
+            let plan = args.text_plan();
+            let mut reason = plan.reason.clone();
+            let external = if plan.prunable {
+                match provider(&plan) {
+                    Ok(groups) => {
+                        let haystacks = args.index_external_haystacks(&groups);
+                        if haystacks.is_none() {
+                            reason = Some("candidate_mismatch".to_owned());
+                        }
+                        haystacks
+                    }
+                    Err(declined) => {
+                        reason = Some(declined);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let used = if external.is_some() { "daemon" } else { "walk" };
+            index::events::record(serde_json::json!({
+                "event": "search",
+                "requested": "default",
+                "used": used,
+                "reason": reason,
+            }));
+            exit_value(finish_with(flags::ParseResult::Ok(args), external))
+        }
+        other => exit_value(finish(other)),
+    }
 }
 
 /// List the files ripgrep would search for `path` under `cwd`.
@@ -111,7 +166,7 @@ pub fn list_files(cwd: &Path, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn exit_value(code: ExitCode) -> i32 {
+pub(crate) fn exit_value(code: ExitCode) -> i32 {
     if code == ExitCode::SUCCESS {
         0
     } else if code == ExitCode::from(1) {
@@ -123,8 +178,15 @@ fn exit_value(code: ExitCode) -> i32 {
 
 /// Then, as it was, then again it will be.
 fn finish(parsed: crate::flags::ParseResult<HiArgs>) -> ExitCode {
+    finish_with(parsed, None)
+}
+
+fn finish_with(
+    parsed: crate::flags::ParseResult<HiArgs>,
+    external: Option<crate::index::client::DaemonSearch<haystack::Haystack>>,
+) -> ExitCode {
     index::profile::mark("args_parsed");
-    let code = match run(parsed) {
+    let code = match run_with(parsed, external) {
         Ok(code) => code,
         Err(err) => {
             // Look for a broken pipe error. In this case, we generally want
@@ -161,7 +223,10 @@ fn finish(parsed: crate::flags::ParseResult<HiArgs>) -> ExitCode {
 /// abstractions, for example, instead of representing the `-g/--glob` flag
 /// as a `Vec<String>` (as in the low level representation), the globs are
 /// converted into a single matcher.
-fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
+fn run_with(
+    result: crate::flags::ParseResult<HiArgs>,
+    external: Option<crate::index::client::DaemonSearch<haystack::Haystack>>,
+) -> anyhow::Result<ExitCode> {
     use crate::flags::{Mode, ParseResult};
 
     let args = match result {
@@ -169,10 +234,11 @@ fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
         ParseResult::Special(mode) => return special(mode),
         ParseResult::Ok(args) => args,
     };
+    let mut external = external;
     let matched = match args.mode() {
         Mode::Search(_) if !args.matches_possible() => false,
-        Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
-        Mode::Search(mode) => search_parallel(&args, mode)?,
+        Mode::Search(mode) if args.threads() == 1 => search(&args, mode, external.take())?,
+        Mode::Search(mode) => search_parallel(&args, mode, external.take())?,
         Mode::Files if args.threads() == 1 => files(&args)?,
         Mode::Files => files_parallel(&args)?,
         Mode::Types => return types(&args),
@@ -191,11 +257,16 @@ fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
 ///
 /// This recursively steps through the file list (current directory by default)
 /// and searches each file sequentially.
-fn search(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
+fn search(
+    args: &HiArgs,
+    mode: SearchMode,
+    external: Option<crate::index::client::DaemonSearch<haystack::Haystack>>,
+) -> anyhow::Result<bool> {
     let started_at = std::time::Instant::now();
     let haystack_builder = args.haystack_builder();
-    // wgrep: a running index daemon replaces the walk when it applies.
-    let daemon = args.index_daemon_haystacks();
+    // wgrep: a running index daemon (or a host daemon's verified candidates)
+    // replaces the walk when it applies.
+    let daemon = external.or_else(|| args.index_daemon_haystacks());
     index::profile::mark("daemon_haystacks_done");
     index::profile::set("threads", serde_json::json!(1));
     if let Some(d) = daemon.as_ref() {
@@ -267,7 +338,11 @@ fn search(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
 ///
 /// Requesting a sorted output from ripgrep (such as with `--sort path`) will
 /// automatically disable parallelism and hence sorting is not handled here.
-fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
+fn search_parallel(
+    args: &HiArgs,
+    mode: SearchMode,
+    external: Option<crate::index::client::DaemonSearch<haystack::Haystack>>,
+) -> anyhow::Result<bool> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let started_at = std::time::Instant::now();
@@ -321,7 +396,7 @@ fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
             WalkState::Continue
         }
     };
-    let daemon = args.index_daemon_haystacks();
+    let daemon = external.or_else(|| args.index_daemon_haystacks());
     index::profile::mark("daemon_haystacks_done");
     if let Some(daemon) = daemon {
         // A running daemon already resolved candidates; search those instead

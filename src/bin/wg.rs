@@ -46,14 +46,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
-    let args: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(|a| {
-            a.into_string()
-                .map_err(|_| "wg requires UTF-8 command arguments")
-        })
-        .collect::<std::result::Result<_, _>>()?;
-    let (invocation, cache) = match lexical::classify(&args) {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let (invocation, cache) = match lexical::classify_os(&args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("wg: {error}");
@@ -61,7 +55,6 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::from(2));
         }
     };
-    let cache = cache.map(PathBuf::from);
     match invocation {
         Invocation::Help => {
             println!("{HELP}");
@@ -138,6 +131,17 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                     r["total_ms"].as_u64().unwrap_or(0) as f64 / 1000.0,
                     r["pid"]
                 );
+                if let Some(text) = root.get("text") {
+                    println!(
+                        "Text index: {:.2}s | {} files | {:.1} MB on disk | {:.1} MB resident",
+                        text["build_ms"].as_u64().unwrap_or(0) as f64 / 1000.0,
+                        text["files"].as_u64().unwrap_or(0),
+                        text["disk_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0,
+                        text["resident_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0
+                    );
+                } else if let Some(error) = r["text_error"].as_str() {
+                    println!("Text index unavailable: {error}");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -172,6 +176,18 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                         root["chunks"],
                         root["generation"]
                     );
+                    if let Some(text) = root.get("text") {
+                        println!(
+                            "  text: {} [{}], {} files, {:.1} MB disk, {:.1} MB resident",
+                            if text["untrusted"] == true { "untrusted" } else { "ready" },
+                            if text["needs_rescan"] == true { "reconciling" } else { "current" },
+                            text["files"].as_u64().unwrap_or(0),
+                            text["disk_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0,
+                            text["resident_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0
+                        );
+                    } else if let Some(error) = root["text_error"].as_str() {
+                        println!("  text index unavailable: {error}");
+                    }
                     if let Some(error) = root["error"].as_str() {
                         println!("  {error}");
                     }
@@ -221,9 +237,8 @@ fn run_semantic(semantic: Semantic) -> Result<ExitCode> {
     Ok(ExitCode::from(if results.is_empty() { 1 } else { 0 }))
 }
 
-fn run_lexical(argv: &[String]) -> Result<ExitCode> {
-    let argv: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
-    let code = wisp_grep::run_rg(argv);
+fn run_lexical(argv: &[std::ffi::OsString]) -> Result<ExitCode> {
+    let code = wisp_grep::run_rg_text(argv.to_vec(), service::text_groups);
     Ok(ExitCode::from(code as u8))
 }
 

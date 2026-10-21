@@ -2650,6 +2650,7 @@ dependencies = [
  "memmap2",
  "notify",
  "regex-syntax",
+ "serde",
  "serde_json",
  "termcolor",
  "textwrap",

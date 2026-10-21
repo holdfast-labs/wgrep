@@ -53,13 +53,13 @@ impl Stat {
 
 /// One candidate: an index id (its path is read from `index` after the lock
 /// is released) or a walked file absent from the index.
-enum Hit {
+pub(crate) enum Hit {
     Id(u32),
     Added(String),
 }
 
 /// A query's result. Paths are materialized after the lock is released.
-struct Answer {
+pub(crate) struct Answer {
     total: usize,
     index: Arc<Index>,
     hits: Vec<Hit>,
@@ -156,7 +156,7 @@ enum ExamineOutcome {
     Fallback,
 }
 
-struct State {
+pub(crate) struct State {
     root_arg: PathBuf,
     /// The absolute root, for re-resolving ignore dependencies.
     root: PathBuf,
@@ -194,9 +194,62 @@ struct State {
     reconciling: Arc<AtomicBool>,
     /// Set when an event arrives during a reconcile.
     missed: Arc<AtomicBool>,
+    /// A walked path could not be expressed as UTF-8 relative to the root, so
+    /// the candidate list cannot name every file the walk would search. The
+    /// index then declines to prune rather than risk a dropped match.
+    unprunable: bool,
 }
 
 impl State {
+    /// Build the state an embedded text index uses. The standalone daemon
+    /// builds the same value in `serve`.
+    pub(crate) fn new(
+        args: HiArgs,
+        root_arg: PathBuf,
+        root: PathBuf,
+        index: Arc<Index>,
+        reconciling: Arc<AtomicBool>,
+        missed: Arc<AtomicBool>,
+    ) -> State {
+        let deps = ignore_deps::Deps::snapshot(&root);
+        State {
+            root_arg,
+            root,
+            args,
+            index,
+            deps,
+            ids: Vec::new(),
+            added: HashMap::new(),
+            needs_rescan: true,
+            rescan_cause: WalkCause::Startup,
+            walks: WalkCounts::default(),
+            next_seq: 0,
+            dirty: 0,
+            reconciling,
+            missed,
+            unprunable: false,
+        }
+    }
+
+    /// Live counters for `wg status`.
+    pub(crate) fn text_stats(&self) -> serde_json::Value {
+        serde_json::json!({
+            "files": self.index.file_count(),
+            "dirty": self.dirty,
+            "added": self.added.len(),
+            "needs_rescan": self.needs_rescan,
+            "unprunable": self.unprunable,
+            "walks": {
+                "startup": self.walks.startup,
+                "overflow": self.walks.overflow,
+                "outside_dep": self.walks.outside_dep,
+                "scoped": self.walks.scoped,
+                "pending_retry": self.walks.pending_retry,
+                "rebuild": self.walks.rebuild,
+            },
+        })
+    }
+
     /// Whether the index's record for `id` matches `md` and a change `token`.
     fn record_matches(index: &Index, id: usize, md: &std::fs::Metadata, token: Option<i64>) -> bool {
         Self::record_matches_clock(index, id, &FileClock::of(md, token))
@@ -259,6 +312,7 @@ impl State {
         let mut ids = vec![IdState { seq: 0, seen: false, current: false }; n];
         let mut added: HashMap<String, u32> = HashMap::new();
         let mut dirty = 0usize;
+        self.unprunable = false;
         let haystacks = self.args.haystack_builder();
         // Windows: change times come from one directory handle per directory,
         // not one open per file. The walk visits a directory's entries
@@ -270,7 +324,10 @@ impl State {
         for result in self.args.walk_builder()?.build() {
             let Some(hay) = haystacks.build_from_result(result) else { continue };
             let Some(dent) = hay.dent() else { continue };
-            let Some(rel) = build::relative(dent.path(), &self.root_arg) else { continue };
+            let Some(rel) = build::relative(dent.path(), &self.root_arg) else {
+                self.unprunable = true;
+                continue;
+            };
             match index.find(rel.as_bytes()) {
                 Some(id) if (id as usize) < n => {
                     let current = match dent.metadata() {
@@ -512,7 +569,7 @@ fn git_pointer_event(event: &notify::Result<notify::Event>, root: &Path) -> bool
 /// file set may be stale, then reads under a shared lock.
 /// Returns the answer, whether it rescanned, and the milliseconds spent
 /// waiting for the state lock (read and, on a rescan, write).
-fn answer(
+pub(crate) fn answer(
     state: &RwLock<State>,
     pending: &PendingSet,
     health: &watch_budget::Health,
@@ -536,7 +593,7 @@ fn answer(
     // outside the watched root; the tokens are cheap to re-read and a
     // change re-walks with rg's current ignore rules.
     if !s.needs_rescan && !s.deps.changed() {
-        if health.stats().untrusted { return Ok(Answered::PendingTimeout); }
+        if health.stats().untrusted || s.unprunable { return Ok(Answered::PendingTimeout); }
         return Ok(Answered::Candidates(s.candidates(query, prefix), false, lock_ms));
     }
     drop(s);
@@ -552,7 +609,41 @@ fn answer(
         s.reconcile()?;
     }
     if health.stats().untrusted { return Ok(Answered::PendingTimeout); }
+    if s.unprunable { return Ok(Answered::PendingTimeout); }
     Ok(Answered::Candidates(s.candidates(query, prefix), rescanned, lock_ms))
+}
+
+/// Candidates materialized for an embedded query. Paths are relative to the
+/// requested prefix, `/`-separated, in rg's walk order.
+pub(crate) struct TextAnswer {
+    pub(crate) files: usize,
+    pub(crate) paths: Vec<String>,
+}
+
+/// [`answer`], with paths read from the index after the lock is released.
+/// `None` means the cache cannot be trusted; the caller must walk.
+pub(crate) fn answer_text(
+    state: &RwLock<State>,
+    pending: &PendingSet,
+    health: &watch_budget::Health,
+    query: &plan::Query,
+    prefix: &str,
+) -> anyhow::Result<Option<TextAnswer>> {
+    let ans = match answer(state, pending, health, query, prefix)? {
+        Answered::Candidates(ans, _, _) => ans,
+        Answered::PendingTimeout => return Ok(None),
+    };
+    let mut paths = Vec::with_capacity(ans.hits.len());
+    for hit in &ans.hits {
+        match hit {
+            Hit::Id(id) => {
+                let rel = std::str::from_utf8(ans.index.path(*id as usize)).unwrap_or("");
+                paths.push(rest_under(rel, prefix).unwrap_or(rel).to_owned());
+            }
+            Hit::Added(rest) => paths.push(rest.clone()),
+        }
+    }
+    Ok(Some(TextAnswer { files: ans.total, paths }))
 }
 
 /// `rel` with the directory `prefix` and its single `/` removed, or `None` when
@@ -750,7 +841,7 @@ const PENDING_WAIT_BOUND: Duration = Duration::from_secs(30);
 /// The set lives beside the state lock (a `Condvar` needs a `Mutex`): the
 /// watcher inserts on delivery and removes after applying, and queries only
 /// ever wait on it, so neither side holds it while taking the state lock.
-struct PendingSet {
+pub(crate) struct PendingSet {
     mutex: Mutex<HashSet<PathBuf>>,
     cv: Arc<Condvar>,
     gate: Arc<Mutex<()>>,
@@ -761,7 +852,7 @@ struct PendingSet {
 }
 
 impl PendingSet {
-    fn with_health(health: &watch_budget::Health) -> PendingSet {
+    pub(crate) fn with_health(health: &watch_budget::Health) -> PendingSet {
         PendingSet { mutex: Mutex::new(HashSet::new()), cv: health.condvar(), gate: health.gate(), bound: PENDING_WAIT_BOUND, health: Some(health.clone()) }
     }
 
@@ -817,7 +908,7 @@ impl PendingSet {
 }
 
 /// Result of a daemon query.
-enum Answered {
+pub(crate) enum Answered {
     /// Authoritative candidates (whether the index was re-walked or not),
     /// whether a rescan ran, and the milliseconds spent waiting for the state
     /// lock.
@@ -1101,6 +1192,7 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
         dirty: 0,
         reconciling: reconciling.clone(),
         missed: missed.clone(),
+        unprunable: false,
     };
     // The file set is reconciled lazily on the first query (`needs_rescan`),
     // so startup is fast and a slow first walk does not delay the listener.
@@ -1111,277 +1203,8 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
         let state = state.clone();
         let pending = pending.clone();
         let root = root.clone();
-        let (reconciling, missed, health) = (reconciling.clone(), missed.clone(), health.clone());
-        std::thread::spawn(move || {
-            // Batches that arrive while a reconcile holds the state lock are
-            // re-queued here when they are scoped-class, for examination
-            // after the walk (which reads strictly newer filesystem state,
-            // so it covers whatever the walk missed). Full-class batches
-            // still escalate via `missed`, which the reconciler turns into
-            // one follow-up walk covering them. Re-queuing instead of
-            // escalating scoped work is what keeps ordinary changes from
-            // causing full walks under laggy event delivery.
-            let mut deferred: Vec<watch_budget::Work> = Vec::new();
-            loop {
-                // Drain re-queued batches before blocking for new events, but
-                // never block with work outstanding: queries wait on
-                // `pending`, so wedging here would wedge them. While a walk
-                // runs, wait briefly for new events instead of spinning, then
-                // re-check (the walk may have ended).
-                let mut batch: Vec<watch_budget::Work>;
-                let fresh: bool;
-                if !deferred.is_empty() && !reconciling.load(Ordering::SeqCst) {
-                    batch = std::mem::take(&mut deferred);
-                    fresh = false;
-                } else {
-                    let first = if deferred.is_empty() {
-                        match rx.recv() {
-                            Ok(event) => event,
-                            Err(_) => { health.mark_untrusted(); break },
-                        }
-                    } else {
-                        match rx.recv_timeout(Duration::from_millis(100)) {
-                            Ok(event) => event,
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => { health.mark_untrusted(); break },
-                        }
-                    };
-                    // Drain everything pending into one batch so a burst takes the
-                    // state lock once instead of once per event.
-                    batch = vec![first];
-                    while let Ok(e) = rx.try_recv() {
-                        batch.push(e);
-                    }
-                    fresh = true;
-                }
-                if std::env::var_os("WGREP_INDEX_DEBUG").is_some() {
-                    for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
-                        eprintln!("wgrep: event {:?} {:?}", event.kind, event.paths);
-                    }
-                }
-                let mut paths: Vec<PathBuf> = Vec::new();
-                for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
-                    paths.extend(event.paths.iter().cloned());
-                }
-                // Record fresh batches before doing any I/O, so a query never
-                // answers between delivery and application. Re-queued batches
-                // never left `pending`.
-                if fresh {
-                    pending.insert(paths.iter().cloned());
-                }
-                // A reconcile is walking: scoped-class batches re-queue for
-                // examination afterwards, full-class batches escalate via
-                // `missed` as before. The pre-stat classification is
-                // conservative (no skip set yet); the precise one runs below
-                // if the walk already ended. Re-check after storing: the
-                // reconciler may have finished between our load and store, in
-                // which case this batch is processed inline.
-                if reconciling.load(Ordering::SeqCst) {
-                    let mut full = false;
-                    for work in &batch { let event = work.event();
-                        if State::full_cause(event, &root, &HashSet::new()).is_some()
-                            || git_pointer_event(event, &root)
-                        {
-                            full = true;
-                            break;
-                        }
-                    }
-                    if full {
-                        missed.store(true, Ordering::SeqCst);
-                    }
-                    if reconciling.load(Ordering::SeqCst) {
-                        if full {
-                            pending.remove(paths);
-                        } else {
-                            deferred.extend(batch);
-                        }
-                        continue;
-                    }
-                }
-                // Stat before walking: on Windows the change token may open
-                // the file, and that I/O must not block queries.
-                let mut stats: HashMap<PathBuf, Stat> = HashMap::new();
-                for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
-                    for path in &event.paths {
-                        if !stats.contains_key(path) {
-                            let mut stat = Stat::of(path);
-                            // Fresh files can be briefly locked by antivirus
-                            // scanners; short backoff beats a full walk for a
-                            // transient lock (observed well past 25 ms under
-                            // Defender). A missing file stays missing.
-                            for nap in [25, 50, 100] {
-                                if matches!(&stat.md, Err(e) if e.kind() != std::io::ErrorKind::NotFound) {
-                                    std::thread::sleep(Duration::from_millis(nap));
-                                    stat = Stat::of(path);
-                                } else {
-                                    break;
-                                }
-                            }
-                            stats.insert(path.clone(), stat);
-                        }
-                    }
-                }
-                // A modify on a directory means its entries changed; the
-                // entries' own events carry the changes, so the directory
-                // itself needs no state change. This matters on Windows,
-                // where every entry add/remove also modifies the parent (up
-                // to the root, which would otherwise read as a full-walk
-                // trigger) and where notify lumps all modifications into
-                // Modify(Any). Skipping is sound: without watcher overflow (a
-                // full-walk trigger on its own) no event is ever dropped, so
-                // the entries are always examined separately. Renames
-                // (Modify(Name)) and unclassified modifications
-                // (Modify(Other)) are never skipped. Directory
-                // attribute-only changes are astronomically rare and benign
-                // here: at worst a file stays a candidate until the next
-                // event or walk touches it.
-                //
-                // A modify on a file whose stat still matches its index
-                // record is likewise noise (typically the reconcile's own
-                // reads on Windows, where last-access updates surface as
-                // Modify(Any)): dropping it is exactly what today's
-                // dirty-marking does when the same comparison succeeds, so
-                // the candidate computation is unchanged. Only already-seen,
-                // currently-current files qualify; anything else (new,
-                // dirty, forgotten, or unknown) is examined normally, which
-                // preserves the old resurrect-on-modify semantics exactly.
-                // The racy same-tick hole this shares with today's logic
-                // (a rewrite within the change-token tick still matching)
-                // is Phase 3's subject, not Phase 1's.
-                let is_noise = |s: &State, event: &notify::Event, path: &Path| -> bool {
-                    let stat = match stats.get(path) {
-                        Some(stat) => stat,
-                        None => return false,
-                    };
-                    let md = match stat.md.as_ref() {
-                        Ok(md) => md,
-                        Err(_) => return false,
-                    };
-                    match &event.kind {
-                        EventKind::Modify(
-                            notify::event::ModifyKind::Data(_)
-                            | notify::event::ModifyKind::Metadata(_)
-                            | notify::event::ModifyKind::Any,
-                        ) if md.is_dir() => true,
-                        EventKind::Modify(
-                            notify::event::ModifyKind::Data(_)
-                            | notify::event::ModifyKind::Metadata(_)
-                            | notify::event::ModifyKind::Any,
-                        ) => {
-                            let Some(rel) = build::relative(path, &s.root) else { return false };
-                            let Some(id) = s.index.find(rel.as_bytes()) else { return false };
-                            (id as usize) < s.ids.len() && {
-                                let st = s.ids[id as usize];
-                                st.seen
-                                    && st.current
-                                    && State::record_matches_clock(
-                                        &s.index,
-                                        id as usize,
-                                        &FileClock::of(md, stat.token),
-                                    )
-                            }
-                        }
-                        _ => false,
-                    }
-                };
-                // Directory entry-noise and read-noise (see above) never wait
-                // in `pending`: neither needs a state change, so queries
-                // must not wait on them.
-                let s = state.read().unwrap();
-                let mut skipped: HashSet<PathBuf> = HashSet::new();
-                for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
-                    for path in &event.paths {
-                        if is_noise(&s, event, path) {
-                            skipped.insert(path.clone());
-                        }
-                    }
-                }
-                drop(s);
-                pending.remove(skipped.iter().cloned());
-                paths.retain(|path| !skipped.contains(path));
-                // Visibility-related events still need a full walk (later
-                // incremental phases); flagging now subsumes any scoped work
-                // for the rest of the batch.
-                let mut full: Option<WalkCause> = None;
-                for work in &batch { let event = work.event();
-                    if let Some(cause) = State::full_cause(event, &root, &skipped) {
-                        full = Some(cause);
-                        break;
-                    }
-                    if git_pointer_event(event, &root) {
-                        full = Some(WalkCause::Scoped);
-                        break;
-                    }
-                }
-                if let Some(cause) = full {
-                    state.write().unwrap().flag_rescan(cause);
-                    pending.remove(paths);
-                    continue;
-                }
-                // A rescan is already scheduled: scoped results would be
-                // discarded by it, so skip the walks.
-                if state.read().unwrap().needs_rescan {
-                    pending.remove(paths);
-                    continue;
-                }
-                // Scoped walks (I/O, no state lock held across them beyond
-                // one shared read guard, which blocks writers but not
-                // queries; the known-file closure borrows that guard instead
-                // of re-locking).
-                let index = state.read().unwrap().index.clone();
-                let mut actions = Vec::new();
-                let mut fallback_paths: Vec<PathBuf> = Vec::new();
-                for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
-                    for path in &event.paths {
-                        if skipped.contains(path) {
-                            continue;
-                        }
-                        let s = state.read().unwrap();
-                        let outcome = match stats.get(path) {
-                            Some(stat) => examine(&s.args, &s.root, path, stat, &|dir| {
-                                s.dir_has_known_file(dir)
-                            }),
-                            None => ExamineOutcome::Fallback,
-                        };
-                        drop(s);
-                        match outcome {
-                            ExamineOutcome::Actions(mut found) => actions.append(&mut found),
-                            ExamineOutcome::Fallback => fallback_paths.push(path.clone()),
-                        }
-                    }
-                }
-                // Re-check before taking the write lock: a reconcile may
-                // have started during the walks. Same rule as above:
-                // full-class escalates, scoped-class re-queues.
-                if reconciling.load(Ordering::SeqCst) {
-                    let mut full = false;
-                    for work in &batch { let event = work.event();
-                        if State::full_cause(event, &root, &skipped).is_some() {
-                            full = true;
-                            break;
-                        }
-                    }
-                    if full {
-                        missed.store(true, Ordering::SeqCst);
-                    }
-                    if reconciling.load(Ordering::SeqCst) {
-                        if full {
-                            pending.remove(paths);
-                        } else {
-                            deferred.extend(batch);
-                        }
-                        continue;
-                    }
-                }
-                state.write().unwrap().apply_scoped(&index, actions, !fallback_paths.is_empty());
-                if !fallback_paths.is_empty() && std::env::var_os("WGREP_INDEX_DEBUG").is_some() {
-                    for path in &fallback_paths {
-                        eprintln!("wgrep: scoped fallback for {}", path.display());
-                    }
-                }
-                pending.remove(paths);
-            }
-        });
+        let health = health.clone();
+        std::thread::spawn(move || event_loop(state, pending, health, root, rx));
     }
     {
         let (state, root, root_arg) = (state.clone(), root.clone(), root_arg.clone());
@@ -1462,6 +1285,287 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn event_loop(
+    state: Arc<RwLock<State>>,
+    pending: Arc<PendingSet>,
+    health: watch_budget::Health,
+    root: PathBuf,
+    rx: watch_budget::Receiver,
+) {
+    let (reconciling, missed) = {
+        let s = state.read().unwrap();
+        (s.reconciling.clone(), s.missed.clone())
+    };
+    // Batches that arrive while a reconcile holds the state lock are
+    // re-queued here when they are scoped-class, for examination
+    // after the walk (which reads strictly newer filesystem state,
+    // so it covers whatever the walk missed). Full-class batches
+    // still escalate via `missed`, which the reconciler turns into
+    // one follow-up walk covering them. Re-queuing instead of
+    // escalating scoped work is what keeps ordinary changes from
+    // causing full walks under laggy event delivery.
+    let mut deferred: Vec<watch_budget::Work> = Vec::new();
+    loop {
+        // Drain re-queued batches before blocking for new events, but
+        // never block with work outstanding: queries wait on
+        // `pending`, so wedging here would wedge them. While a walk
+        // runs, wait briefly for new events instead of spinning, then
+        // re-check (the walk may have ended).
+        let mut batch: Vec<watch_budget::Work>;
+        let fresh: bool;
+        if !deferred.is_empty() && !reconciling.load(Ordering::SeqCst) {
+            batch = std::mem::take(&mut deferred);
+            fresh = false;
+        } else {
+            let first = if deferred.is_empty() {
+                match rx.recv() {
+                    Ok(event) => event,
+                    Err(_) => { health.mark_untrusted(); break },
+                }
+            } else {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => { health.mark_untrusted(); break },
+                }
+            };
+            // Drain everything pending into one batch so a burst takes the
+            // state lock once instead of once per event.
+            batch = vec![first];
+            while let Ok(e) = rx.try_recv() {
+                batch.push(e);
+            }
+            fresh = true;
+        }
+        if std::env::var_os("WGREP_INDEX_DEBUG").is_some() {
+            for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
+                eprintln!("wgrep: event {:?} {:?}", event.kind, event.paths);
+            }
+        }
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
+            paths.extend(event.paths.iter().cloned());
+        }
+        // Record fresh batches before doing any I/O, so a query never
+        // answers between delivery and application. Re-queued batches
+        // never left `pending`.
+        if fresh {
+            pending.insert(paths.iter().cloned());
+        }
+        // A reconcile is walking: scoped-class batches re-queue for
+        // examination afterwards, full-class batches escalate via
+        // `missed` as before. The pre-stat classification is
+        // conservative (no skip set yet); the precise one runs below
+        // if the walk already ended. Re-check after storing: the
+        // reconciler may have finished between our load and store, in
+        // which case this batch is processed inline.
+        if reconciling.load(Ordering::SeqCst) {
+            let mut full = false;
+            for work in &batch { let event = work.event();
+                if State::full_cause(event, &root, &HashSet::new()).is_some()
+                    || git_pointer_event(event, &root)
+                {
+                    full = true;
+                    break;
+                }
+            }
+            if full {
+                missed.store(true, Ordering::SeqCst);
+            }
+            if reconciling.load(Ordering::SeqCst) {
+                if full {
+                    pending.remove(paths);
+                } else {
+                    deferred.extend(batch);
+                }
+                continue;
+            }
+        }
+        // Stat before walking: on Windows the change token may open
+        // the file, and that I/O must not block queries.
+        let mut stats: HashMap<PathBuf, Stat> = HashMap::new();
+        for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
+            for path in &event.paths {
+                if !stats.contains_key(path) {
+                    let mut stat = Stat::of(path);
+                    // Fresh files can be briefly locked by antivirus
+                    // scanners; short backoff beats a full walk for a
+                    // transient lock (observed well past 25 ms under
+                    // Defender). A missing file stays missing.
+                    for nap in [25, 50, 100] {
+                        if matches!(&stat.md, Err(e) if e.kind() != std::io::ErrorKind::NotFound) {
+                            std::thread::sleep(Duration::from_millis(nap));
+                            stat = Stat::of(path);
+                        } else {
+                            break;
+                        }
+                    }
+                    stats.insert(path.clone(), stat);
+                }
+            }
+        }
+        // A modify on a directory means its entries changed; the
+        // entries' own events carry the changes, so the directory
+        // itself needs no state change. This matters on Windows,
+        // where every entry add/remove also modifies the parent (up
+        // to the root, which would otherwise read as a full-walk
+        // trigger) and where notify lumps all modifications into
+        // Modify(Any). Skipping is sound: without watcher overflow (a
+        // full-walk trigger on its own) no event is ever dropped, so
+        // the entries are always examined separately. Renames
+        // (Modify(Name)) and unclassified modifications
+        // (Modify(Other)) are never skipped. Directory
+        // attribute-only changes are astronomically rare and benign
+        // here: at worst a file stays a candidate until the next
+        // event or walk touches it.
+        //
+        // A modify on a file whose stat still matches its index
+        // record is likewise noise (typically the reconcile's own
+        // reads on Windows, where last-access updates surface as
+        // Modify(Any)): dropping it is exactly what today's
+        // dirty-marking does when the same comparison succeeds, so
+        // the candidate computation is unchanged. Only already-seen,
+        // currently-current files qualify; anything else (new,
+        // dirty, forgotten, or unknown) is examined normally, which
+        // preserves the old resurrect-on-modify semantics exactly.
+        // The racy same-tick hole this shares with today's logic
+        // (a rewrite within the change-token tick still matching)
+        // is Phase 3's subject, not Phase 1's.
+        let is_noise = |s: &State, event: &notify::Event, path: &Path| -> bool {
+            let stat = match stats.get(path) {
+                Some(stat) => stat,
+                None => return false,
+            };
+            let md = match stat.md.as_ref() {
+                Ok(md) => md,
+                Err(_) => return false,
+            };
+            match &event.kind {
+                EventKind::Modify(
+                    notify::event::ModifyKind::Data(_)
+                    | notify::event::ModifyKind::Metadata(_)
+                    | notify::event::ModifyKind::Any,
+                ) if md.is_dir() => true,
+                EventKind::Modify(
+                    notify::event::ModifyKind::Data(_)
+                    | notify::event::ModifyKind::Metadata(_)
+                    | notify::event::ModifyKind::Any,
+                ) => {
+                    let Some(rel) = build::relative(path, &s.root) else { return false };
+                    let Some(id) = s.index.find(rel.as_bytes()) else { return false };
+                    (id as usize) < s.ids.len() && {
+                        let st = s.ids[id as usize];
+                        st.seen
+                            && st.current
+                            && State::record_matches_clock(
+                                &s.index,
+                                id as usize,
+                                &FileClock::of(md, stat.token),
+                            )
+                    }
+                }
+                _ => false,
+            }
+        };
+        // Directory entry-noise and read-noise (see above) never wait
+        // in `pending`: neither needs a state change, so queries
+        // must not wait on them.
+        let s = state.read().unwrap();
+        let mut skipped: HashSet<PathBuf> = HashSet::new();
+        for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
+            for path in &event.paths {
+                if is_noise(&s, event, path) {
+                    skipped.insert(path.clone());
+                }
+            }
+        }
+        drop(s);
+        pending.remove(skipped.iter().cloned());
+        paths.retain(|path| !skipped.contains(path));
+        // Visibility-related events still need a full walk (later
+        // incremental phases); flagging now subsumes any scoped work
+        // for the rest of the batch.
+        let mut full: Option<WalkCause> = None;
+        for work in &batch { let event = work.event();
+            if let Some(cause) = State::full_cause(event, &root, &skipped) {
+                full = Some(cause);
+                break;
+            }
+            if git_pointer_event(event, &root) {
+                full = Some(WalkCause::Scoped);
+                break;
+            }
+        }
+        if let Some(cause) = full {
+            state.write().unwrap().flag_rescan(cause);
+            pending.remove(paths);
+            continue;
+        }
+        // A rescan is already scheduled: scoped results would be
+        // discarded by it, so skip the walks.
+        if state.read().unwrap().needs_rescan {
+            pending.remove(paths);
+            continue;
+        }
+        // Scoped walks (I/O, no state lock held across them beyond
+        // one shared read guard, which blocks writers but not
+        // queries; the known-file closure borrows that guard instead
+        // of re-locking).
+        let index = state.read().unwrap().index.clone();
+        let mut actions = Vec::new();
+        let mut fallback_paths: Vec<PathBuf> = Vec::new();
+        for event in batch.iter().filter_map(|w| w.event().as_ref().ok()) {
+            for path in &event.paths {
+                if skipped.contains(path) {
+                    continue;
+                }
+                let s = state.read().unwrap();
+                let outcome = match stats.get(path) {
+                    Some(stat) => examine(&s.args, &s.root, path, stat, &|dir| {
+                        s.dir_has_known_file(dir)
+                    }),
+                    None => ExamineOutcome::Fallback,
+                };
+                drop(s);
+                match outcome {
+                    ExamineOutcome::Actions(mut found) => actions.append(&mut found),
+                    ExamineOutcome::Fallback => fallback_paths.push(path.clone()),
+                }
+            }
+        }
+        // Re-check before taking the write lock: a reconcile may
+        // have started during the walks. Same rule as above:
+        // full-class escalates, scoped-class re-queues.
+        if reconciling.load(Ordering::SeqCst) {
+            let mut full = false;
+            for work in &batch { let event = work.event();
+                if State::full_cause(event, &root, &skipped).is_some() {
+                    full = true;
+                    break;
+                }
+            }
+            if full {
+                missed.store(true, Ordering::SeqCst);
+            }
+            if reconciling.load(Ordering::SeqCst) {
+                if full {
+                    pending.remove(paths);
+                } else {
+                    deferred.extend(batch);
+                }
+                continue;
+            }
+        }
+        state.write().unwrap().apply_scoped(&index, actions, !fallback_paths.is_empty());
+        if !fallback_paths.is_empty() && std::env::var_os("WGREP_INDEX_DEBUG").is_some() {
+            for path in &fallback_paths {
+                eprintln!("wgrep: scoped fallback for {}", path.display());
+            }
+        }
+        pending.remove(paths);
+    }
+}
+
 fn parse_walk_args(path: &OsString) -> anyhow::Result<HiArgs> {
     match crate::flags::parse_args(vec![OsString::from("--files"), path.clone()]) {
         ParseResult::Ok(args) => Ok(args),
@@ -1476,7 +1580,7 @@ fn rebuild(args: &HiArgs, root: &Path, root_arg: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBuf, root_arg: PathBuf) {
+pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBuf, root_arg: PathBuf) {
     let mut last = Instant::now();
     loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -1892,6 +1996,7 @@ mod tests {
             dirty: 0,
             reconciling: Arc::new(AtomicBool::new(false)),
             missed: Arc::new(AtomicBool::new(false)),
+            unprunable: false,
         }
     }
 

@@ -1,9 +1,10 @@
-//! One authenticated, multi-root semantic service for the `wg` front door.
+﻿//! One authenticated, multi-root semantic service for the `wg` front door.
 //! The daemon owns one shared model pool; each root has one live index.
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use wgrep::live::{LiveIndex, ModelPool};
 use wgrep::{ModelChoice, Result};
+use wisp_grep::text::{TextGroup, TextIndex, TextPlan};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -32,6 +33,9 @@ struct RootStatus {
     files: usize,
     chunks: usize,
     error: Option<String>,
+    text: Option<serde_json::Value>,
+    text_error: Option<String>,
+    text_build_ms: u64,
 }
 struct Root {
     index: Arc<LiveIndex>,
@@ -40,6 +44,9 @@ struct Root {
     model: ModelChoice,
     dirty: bool,
     error: Option<String>,
+    text: Option<Arc<TextIndex>>,
+    text_error: Option<String>,
+    text_build_ms: u64,
 }
 struct State {
     roots: HashMap<PathBuf, Root>,
@@ -160,9 +167,12 @@ fn refresh_batch(
     }
 }
 fn read_frame(stream: &TcpStream, cap: usize) -> Result<Vec<u8>> {
+    read_frame_timeout(stream, cap, FRAME_TIMEOUT)
+}
+fn read_frame_timeout(stream: &TcpStream, cap: usize, whole: Duration) -> Result<Vec<u8>> {
     let mut r = BufReader::new(stream);
     let mut out = Vec::new();
-    let end = Instant::now() + FRAME_TIMEOUT;
+    let end = Instant::now() + whole;
     loop {
         let remaining = end.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -260,6 +270,9 @@ fn load_metadata() -> Result<serde_json::Value> {
     Ok(v)
 }
 fn request(v: serde_json::Value) -> Result<serde_json::Value> {
+    request_timeout(v, FRAME_TIMEOUT)
+}
+fn request_timeout(v: serde_json::Value, whole: Duration) -> Result<serde_json::Value> {
     let info = load_metadata()?;
     let port = info["port"].as_u64().ok_or("bad service metadata")? as u16;
     let s = TcpStream::connect_timeout(
@@ -274,12 +287,13 @@ fn request(v: serde_json::Value) -> Result<serde_json::Value> {
         return Err("request too large".into());
     }
     b.push(b'\n');
-    write_frame(&s, &b, Duration::from_secs(30))?;
-    let line = read_frame(&s, MAX_REPLY)?;
+    write_frame(&s, &b, whole)?;
+    let line = read_frame_timeout(&s, MAX_REPLY, whole)?;
     let r: serde_json::Value = serde_json::from_slice(&line)?;
     if r["ok"] != true {
         return Err(r["error"]
             .as_str()
+            .or_else(|| r["fallback"].as_str())
             .unwrap_or("service request failed")
             .into());
     }
@@ -307,6 +321,9 @@ fn status(service: &Service) -> serde_json::Value {
                         .load(Ordering::Acquire)
                         .then(|| "watcher lost trust; run wg down, then wg up".into())
                 }),
+                text: r.text.as_ref().map(|t| t.status()),
+                text_error: r.text_error.clone(),
+                text_build_ms: r.text_build_ms,
             }
         })
         .collect();
@@ -365,10 +382,18 @@ fn attach(
             .map(|r| r.index.clone())
     };
     if let Some(index) = existing {
-        let (current_choice, pending, error, lost) = {
+        let (current_choice, pending, error, lost, text, text_error, text_build_ms) = {
             let state = service.state.lock().unwrap();
             let r = &state.roots[&path];
-            (r.model, r.pending.clone(), r.error.clone(), r.lost.clone())
+            (
+                r.model,
+                r.pending.clone(),
+                r.error.clone(),
+                r.lost.clone(),
+                r.text.clone(),
+                r.text_error.clone(),
+                r.text_build_ms,
+            )
         };
         if current_choice != choice {
             return Err(
@@ -399,6 +424,9 @@ fn attach(
                 files: stats.files,
                 chunks: stats.chunks,
                 error: None,
+                text: text.as_ref().map(|t| t.status()),
+                text_error,
+                text_build_ms,
             },
             0,
             0,
@@ -410,6 +438,22 @@ fn attach(
             return Err("service root limit reached".into());
         }
     }
+    // Build the text index before subscribing. Its first query reconciles
+    // with rg's walker, so nothing between the build and the watcher can make
+    // a pruned answer stale.
+    let (text, text_error, text_build_ms) = match TextIndex::open(&path) {
+        Ok(text) => {
+            let build_ms = text.build_ms();
+            (Some(Arc::new(text)), None, build_ms)
+        }
+        Err(error) => {
+            eprintln!(
+                "wg: text index for {} is unavailable: {error:#}",
+                path.display()
+            );
+            (None, Some(format!("{error:#}")), 0)
+        }
+    };
     // Subscribe before the initial scan/build. Loss is sticky: a partial
     // event stream cannot authorise a successful cached answer.
     let (tx, rx) = mpsc::sync_channel::<notify::Result<notify::Event>>(QUEUE);
@@ -418,7 +462,15 @@ fn attach(
     let pending = Arc::new(AtomicUsize::new(0));
     let pending_cb = pending.clone();
     let lost_root = lost.clone();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |e| {
+    let text_cb = text.clone();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
+        // One watcher, two indexes: the text index sees the same events.
+        if let Some(text) = text_cb.as_ref() {
+            match &e {
+                Ok(event) => text.ingest(Ok(event.clone())),
+                Err(_) => text.mark_untrusted(),
+            }
+        }
         match &e {
             Ok(event) if read_only(event) => return,
             Err(_) => {
@@ -475,6 +527,9 @@ fn attach(
             model: choice,
             dirty: false,
             error: None,
+            text,
+            text_error: text_error.clone(),
+            text_build_ms,
         },
     );
     std::thread::Builder::new()
@@ -615,6 +670,15 @@ fn attach(
         .unwrap()
         .index
         .stats();
+    let (text_status, text_error, text_build_ms) = {
+        let state = service.state.lock().unwrap();
+        let root = state.roots.get(&path).unwrap();
+        (
+            root.text.as_ref().map(|t| t.status()),
+            root.text_error.clone(),
+            root.text_build_ms,
+        )
+    };
     Ok((
         RootStatus {
             path,
@@ -624,6 +688,9 @@ fn attach(
             files: stats.files,
             chunks: stats.chunks,
             error: None,
+            text: text_status,
+            text_error,
+            text_build_ms,
         },
         build,
         model_ms,
@@ -649,9 +716,67 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 _ => return Err("model must be auto, code, or text".into()),
             };
             let (r, build, model_ms) = attach(service, &p, c)?;
+            let (text_build_ms, text_error) = (r.text_build_ms, r.text_error.clone());
             Ok(
-                serde_json::json!({"ok":true,"pid":std::process::id(),"root":r,"build_ms":build,"model_ms":model_ms,"total_ms":req["total_ms"]}),
+                serde_json::json!({"ok":true,"pid":std::process::id(),"root":r,"build_ms":build,"model_ms":model_ms,"text_build_ms":text_build_ms,"text_error":text_error,"total_ms":req["total_ms"]}),
             )
+        }
+        "text" => {
+            let plan: TextPlan = serde_json::from_value(req["plan"].clone())
+                .map_err(|e| format!("bad text plan: {e}"))?;
+            if !plan.prunable {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "fallback": "plan_not_prunable",
+                    "reason": plan.reason,
+                }));
+            }
+            let mut groups = Vec::with_capacity(plan.items.len());
+            for item in &plan.items {
+                // The longest attached root that holds this search path and
+                // has a text index. A nested root wins, matching semantic
+                // queries.
+                let found = {
+                    let state = service.state.lock().unwrap();
+                    state
+                        .roots
+                        .iter()
+                        .filter_map(|(root, r)| {
+                            if item.absolute.starts_with(root) {
+                                r.text.clone().map(|text| (root.clone(), text))
+                            } else {
+                                None
+                            }
+                        })
+                        .max_by_key(|(root, _)| root.components().count())
+                };
+                let Some((root, text)) = found else {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "fallback": "no_attached_text_root",
+                    }));
+                };
+                let Some(prefix) = wisp_grep::text::prefix_of(&item.absolute, &root) else {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "fallback": "prefix_not_utf8",
+                    }));
+                };
+                match text.candidates(&item.query, &prefix)? {
+                    Some(candidates) => groups.push(TextGroup {
+                        arg_index: item.arg_index,
+                        files: candidates.files,
+                        paths: candidates.paths,
+                    }),
+                    None => {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "fallback": "text_index_untrusted",
+                        }))
+                    }
+                }
+            }
+            Ok(serde_json::json!({"ok":true,"groups":groups}))
         }
         "query" => {
             let p = root_key(Path::new(req["path"].as_str().unwrap_or(".")));
@@ -840,108 +965,20 @@ pub fn up(path: &Path, model: &str, cache: Option<PathBuf>) -> Result<serde_json
     v["total_ms"] = serde_json::json!(start.elapsed().as_millis());
     Ok(v)
 }
-#[cfg(windows)]
-struct StdioInheritanceGuard(Vec<(isize, u32)>);
 
-#[cfg(windows)]
-impl StdioInheritanceGuard {
-    /// Mark the caller's std handles non-inheritable for the duration of one
-    /// `CreateProcessW`. Without this, a detached daemon inherits the client's
-    /// stdout/stderr pipe and keeps it open, so `wg up | tee`, CI capture, and
-    /// any parent waiting for EOF hang after `wg up` exits.
-    fn disable() -> Self {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
-        }
-        const STD_INPUT_HANDLE: u32 = -10i32 as u32;
-        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
-        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
-        let handles: Vec<isize> = unsafe {
-            [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
-                .into_iter()
-                .map(|which| GetStdHandle(which) as isize)
-                .filter(|handle| *handle != 0 && *handle != -1)
-                .collect()
-        };
-        Self(disable_handle_inheritance(&handles))
-    }
-}
-
-#[cfg(windows)]
-fn disable_handle_inheritance(handles: &[isize]) -> Vec<(isize, u32)> {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetHandleInformation(handle: *mut std::ffi::c_void, flags: *mut u32) -> i32;
-        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
-    }
-    const HANDLE_FLAG_INHERIT: u32 = 1;
-    let mut saved = Vec::new();
-    for &handle in handles {
-        let mut flags = 0u32;
-        unsafe {
-            if GetHandleInformation(handle as *mut std::ffi::c_void, &mut flags) != 0
-                && flags & HANDLE_FLAG_INHERIT != 0
-                && SetHandleInformation(handle as *mut std::ffi::c_void, HANDLE_FLAG_INHERIT, 0)
-                    != 0
-            {
-                saved.push((handle, flags));
-            }
-        }
-    }
-    saved
-}
-
-#[cfg(windows)]
-fn restore_handle_inheritance(saved: &[(isize, u32)]) {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
-    }
-    const HANDLE_FLAG_INHERIT: u32 = 1;
-    for &(handle, flags) in saved {
-        unsafe {
-            let _ = SetHandleInformation(
-                handle as *mut std::ffi::c_void,
-                HANDLE_FLAG_INHERIT,
-                flags & HANDLE_FLAG_INHERIT,
-            );
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for StdioInheritanceGuard {
-    fn drop(&mut self) {
-        restore_handle_inheritance(&std::mem::take(&mut self.0));
-    }
-}
-
-fn spawn(cache: Option<PathBuf>) -> Result<std::process::Child> {
+fn spawn(cache: Option<PathBuf>) -> Result<wisp_grep::detached::DetachedChild> {
     let exe = std::env::current_exe()?;
-    let mut c = std::process::Command::new(exe);
     std::fs::create_dir_all(store_dir())?;
     let log_path = store_dir().join("daemon.log");
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
     private(&log_path);
-    c.arg("--daemon");
+    let mut args = vec![std::ffi::OsString::from("--daemon")];
     if let Some(p) = cache {
-        c.arg("--cache-dir").arg(p);
+        args.push(std::ffi::OsString::from("--cache-dir"));
+        args.push(p.into_os_string());
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x08000000);
-    }
-    #[cfg(windows)]
-    let _stdio_guard = StdioInheritanceGuard::disable();
-    Ok(c.stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()?)
+    // The daemon inherits only NUL and the log. In particular it must not
+    // inherit the caller's stdout pipe, or a piped `wg up` never sees EOF.
+    Ok(wisp_grep::detached::spawn(&exe, &args, &log_path)?)
 }
 pub fn query(
     query: &str,
@@ -959,6 +996,26 @@ pub fn query(
     )
 }
 
+/// Ask a reachable `wg` service for verified text candidates.
+///
+/// `None` on any doubt: no service, plan not prunable, an untrusted index, an
+/// unexpected reply, or the bounded timeout. The caller then runs rg's walk.
+pub fn text_groups(plan: &TextPlan) -> std::result::Result<Vec<TextGroup>, String> {
+    if !plan.prunable {
+        return Err(plan
+            .reason
+            .clone()
+            .unwrap_or_else(|| "plan_not_prunable".to_owned()));
+    }
+    let reply = request_timeout(
+        serde_json::json!({"op":"text","plan":plan}),
+        Duration::from_secs(8),
+    )
+    .map_err(|error| format!("service_unavailable: {error}"))?;
+    serde_json::from_value(reply["groups"].clone())
+        .map_err(|error| format!("bad_text_reply: {error}"))
+}
+
 pub fn status_json() -> Result<serde_json::Value> {
     request(serde_json::json!({"op":"status"}))
 }
@@ -971,39 +1028,6 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
-    #[test]
-    fn inheritance_guard_clears_and_restores_a_real_handle() {
-        use std::os::windows::io::AsRawHandle;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetHandleInformation(handle: *mut std::ffi::c_void, flags: *mut u32) -> i32;
-            fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
-        }
-        const HANDLE_FLAG_INHERIT: u32 = 1;
-        let path = std::env::temp_dir().join(format!("wg-inherit-{}", std::process::id()));
-        let file = std::fs::File::create(&path).unwrap();
-        let handle = file.as_raw_handle() as isize;
-        let flag = |h: isize| {
-            let mut flags = 0u32;
-            assert_ne!(unsafe { GetHandleInformation(h as *mut _, &mut flags) }, 0);
-            flags & HANDLE_FLAG_INHERIT
-        };
-        assert_ne!(
-            unsafe {
-                SetHandleInformation(handle as *mut _, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-            },
-            0
-        );
-        assert_eq!(flag(handle), HANDLE_FLAG_INHERIT);
-        let saved = disable_handle_inheritance(&[handle]);
-        assert_eq!(saved.len(), 1);
-        assert_eq!(flag(handle), 0);
-        restore_handle_inheritance(&saved);
-        assert_eq!(flag(handle), HANDLE_FLAG_INHERIT);
-        drop(file);
-        let _ = std::fs::remove_file(path);
-    }
-
     fn empty_service() -> Service {
         Service {
             state: Mutex::new(State {

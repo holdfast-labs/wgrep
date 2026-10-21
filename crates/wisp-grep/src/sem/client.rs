@@ -262,35 +262,21 @@ pub(crate) fn ensure_serving(root: &Path, cache: &Path, mode: Chunking) -> anyho
         anyhow::bail!("wgrep-sem: slot for {} is claimed by another root: {e:#}", root.display());
     }
     let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--serve").arg(root).arg("--chunking").arg(chunks::chunking_name(mode)).arg("--cache-dir").arg(cache);
-    // Detached stdio: stdin + stdout to null, stderr to the slot-owned
-    // log. Inheriting the caller's pipes would wedge CLI callers whose
+    // Detached stdio: stdin to null, stdout and stderr to the slot-owned log.
+    // Inheriting the caller's pipes would wedge CLI callers whose
     // `capture_output` waits for EOF that a long-lived daemon holds open.
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
+    // `detached::spawn` also passes an explicit Windows handle list, so the
+    // daemon inherits no other handle either.
     let log_path = slot.join("daemon-stderr.log");
-    match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        Ok(f) => {
-            cmd.stderr(f);
-        }
-        Err(_) => {
-            cmd.stderr(std::process::Stdio::null());
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    let mut child = cmd.spawn()?;
+    let args = vec![
+        std::ffi::OsString::from("--serve"),
+        root.as_os_str().to_os_string(),
+        std::ffi::OsString::from("--chunking"),
+        std::ffi::OsString::from(chunks::chunking_name(mode)),
+        std::ffi::OsString::from("--cache-dir"),
+        cache.as_os_str().to_os_string(),
+    ];
+    let mut child = crate::detached::spawn(&exe, &args, &log_path)?;
     // The startup guard stays HELD for this whole poll (released on
     // return): no second starter can spawn while we wait, and the OS
     // releases it for us if we die.

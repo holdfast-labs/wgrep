@@ -17,6 +17,9 @@ const WG_VALUE: &[&str] = &["-k", "--top", "--model", "--cache-dir"];
 /// `wg`-owned value flags that have no meaning in the ripgrep route.
 const WG_SEMANTIC_ONLY: &[&str] = &["-k", "--top", "--model", "--explain"];
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 /// One parsed `wg` invocation. The program name is already removed.
 pub enum Invocation {
     /// `--daemon`: run the foreground service.
@@ -29,8 +32,9 @@ pub enum Invocation {
     /// Default sgrep-compatible semantic search.
     Semantic(Semantic),
     /// Ripgrep filesystem search: the exact argv for the in-process engine.
+    /// Kept as `OsString` so non-UTF-8 arguments reach ripgrep unchanged.
     Lexical {
-        argv: Vec<String>,
+        argv: Vec<OsString>,
     },
     Help,
     Version,
@@ -47,30 +51,49 @@ pub struct Semantic {
 }
 
 /// Classify `args` and lift the global `--cache-dir` out of every route.
-pub fn classify(args: &[String]) -> Result<(Invocation, Option<String>), String> {
+///
+/// The text route keeps the caller's exact `OsString` argv, so a pattern or
+/// path that is not valid UTF-8 reaches ripgrep unchanged.
+pub fn classify_os(args: &[OsString]) -> Result<(Invocation, Option<PathBuf>), String> {
     // A global prefix must be removed before recognizing a subcommand. Never
     // search an rg argv for these tokens: `-e --cache-dir` is a valid pattern.
     let mut leading = 0;
-    let mut prefix_cache = None;
+    let mut prefix_cache: Option<PathBuf> = None;
     while let Some(arg) = args.get(leading) {
         if arg == "--cache-dir" {
             let value = args.get(leading + 1).ok_or("--cache-dir needs a value")?;
-            if value.is_empty() || value.starts_with('-') {
+            if value.is_empty() || value.to_string_lossy().starts_with('-') {
                 return Err("--cache-dir needs a directory value".into());
             }
-            prefix_cache = Some(value.clone());
+            prefix_cache = Some(PathBuf::from(value));
             leading += 2;
-        } else if let Some(value) = arg.strip_prefix("--cache-dir=") {
+        } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--cache-dir=")) {
             if value.is_empty() {
                 return Err("--cache-dir needs a directory value".into());
             }
-            prefix_cache = Some(value.to_owned());
+            prefix_cache = Some(PathBuf::from(value));
             leading += 1;
         } else {
             break;
         }
     }
-    let (invocation, cache) = classify_inner(&args[leading..])?;
+    let tail = &args[leading..];
+    let utf8: Option<Vec<String>> = tail.iter().map(|a| a.to_str().map(str::to_owned)).collect();
+    // A non-UTF-8 value cannot be a wg-owned flag, so a lossy view is enough
+    // to choose the route. It is never used to run the search.
+    let view: Vec<String> = match &utf8 {
+        Some(args) => args.clone(),
+        None => tail.iter().map(|a| a.to_string_lossy().into_owned()).collect(),
+    };
+    let (invocation, cache) = classify_inner(&view)?;
+    let invocation = match invocation {
+        Invocation::Lexical { .. } => Invocation::Lexical { argv: tail.to_vec() },
+        other => other,
+    };
+    if utf8.is_none() && !matches!(invocation, Invocation::Lexical { .. }) {
+        return Err("wg requires UTF-8 command arguments".into());
+    }
+    let cache = cache.map(PathBuf::from);
     if prefix_cache.is_some() && cache.is_some() {
         return Err("--cache-dir must be supplied only once".into());
     }
@@ -152,7 +175,7 @@ fn classify_inner(args: &[String]) -> Result<(Invocation, Option<String>), Strin
         }
         return Ok((
             Invocation::Lexical {
-                argv: args.to_vec(),
+                argv: args.iter().map(OsString::from).collect(),
             },
             None,
         ));
@@ -404,8 +427,9 @@ mod tests {
     use super::*;
 
     fn c(args: &[&str]) -> (Invocation, Option<String>) {
-        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        classify(&owned).expect("classification should succeed")
+        let owned: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let (invocation, cache) = classify_os(&owned).expect("classification should succeed");
+        (invocation, cache.map(|p| p.to_string_lossy().into_owned()))
     }
 
     fn semantic(args: &[&str]) -> Semantic {
@@ -417,7 +441,10 @@ mod tests {
 
     fn lexical(args: &[&str]) -> Vec<String> {
         match c(args).0 {
-            Invocation::Lexical { argv } => argv,
+            Invocation::Lexical { argv } => argv
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
             _ => panic!("expected lexical route for {args:?}"),
         }
     }
@@ -495,11 +522,11 @@ mod tests {
 
     #[test]
     fn mixing_semantic_count_with_rg_options_is_rejected() {
-        let owned: Vec<String> = ["-k", "3", "-F", "foo"]
+        let owned: Vec<OsString> = ["-k", "3", "-F", "foo"]
             .iter()
-            .map(|s| s.to_string())
+            .map(OsString::from)
             .collect();
-        assert!(classify(&owned).is_err());
+        assert!(classify_os(&owned).is_err());
     }
 
     #[test]
@@ -551,20 +578,50 @@ mod tests {
             vec!["up", "--cache-dir="],
             vec!["--cache-dir", "one", "up", "--cache-dir", "two"],
         ] {
-            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
-            assert!(classify(&args).is_err(), "{args:?}");
+            let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+            assert!(classify_os(&args).is_err(), "{args:?}");
         }
     }
 
     #[test]
     fn needless_json_only_query_is_an_error_not_empty_success() {
-        let owned: Vec<String> = ["--json"].iter().map(|s| s.to_string()).collect();
-        assert!(classify(&owned).is_err());
+        let owned: Vec<OsString> = ["--json"].iter().map(OsString::from).collect();
+        assert!(classify_os(&owned).is_err());
     }
 
     #[test]
     fn short_dash_is_positional_stdin() {
         let s = semantic(&["q", "-"]);
         assert_eq!(s.root.as_deref(), Some("-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_arguments_reach_the_text_route_unchanged() {
+        use std::os::unix::ffi::OsStringExt;
+        let pattern = OsString::from_vec(vec![b'f', 0xff, b'o']);
+        let args = vec![OsString::from("-F"), pattern.clone(), OsString::from(".")];
+        match classify_os(&args).expect("text route").0 {
+            Invocation::Lexical { argv } => {
+                assert_eq!(argv, args);
+                assert_eq!(argv[1], pattern);
+            }
+            _ => panic!("expected lexical route"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_utf8_arguments_reach_the_text_route_unchanged() {
+        use std::os::windows::ffi::OsStringExt;
+        let pattern = OsString::from_wide(&[0xD800, 0x0061]);
+        let args = vec![OsString::from("-F"), pattern.clone(), OsString::from(".")];
+        match classify_os(&args).expect("text route").0 {
+            Invocation::Lexical { argv } => {
+                assert_eq!(argv, args);
+                assert_eq!(argv[1], pattern);
+            }
+            _ => panic!("expected lexical route"),
+        }
     }
 }

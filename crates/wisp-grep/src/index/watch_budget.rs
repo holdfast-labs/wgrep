@@ -129,6 +129,11 @@ impl Ingress {
     pub(crate) fn stats(&self) -> Stats {
         Health(self.usage.clone()).stats()
     }
+
+    /// Sticky: this producer lost events, so no cached answer is trustworthy.
+    pub(crate) fn mark_untrusted(&self) {
+        self.usage.untrusted.store(true, Ordering::Release);
+    }
 }
 
 impl Receiver {
