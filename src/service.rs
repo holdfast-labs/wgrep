@@ -1,11 +1,11 @@
-﻿//! One authenticated, multi-root semantic service for the `wg` front door.
+//! One authenticated, multi-root semantic service for the `wg` front door.
 //! The daemon owns one shared model pool; each root has one live index.
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use wgrep::live::{LiveIndex, ModelPool};
+use wgrep::live::{BuildProgress, LiveIndex, ModelPool};
 use wgrep::{ModelChoice, Result};
 use wisp_grep::text::{TextGroup, TextIndex, TextPlan};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -36,6 +36,8 @@ struct RootStatus {
     text: Option<serde_json::Value>,
     text_error: Option<String>,
     text_build_ms: u64,
+    build_ms: u64,
+    model_ms: u64,
 }
 struct Root {
     index: Arc<LiveIndex>,
@@ -47,12 +49,52 @@ struct Root {
     text: Option<Arc<TextIndex>>,
     text_error: Option<String>,
     text_build_ms: u64,
+    build_ms: u64,
+    model_ms: u64,
 }
 struct State {
     roots: HashMap<PathBuf, Root>,
 }
+
+/// One in-flight root build. `up` starts it and returns at once; the client
+/// polls `status`, so no single request must outlive the frame deadline.
+struct BuildState {
+    path: PathBuf,
+    started: Instant,
+    progress: Arc<BuildProgress>,
+    done: AtomicBool,
+    error: Mutex<Option<String>>,
+}
+
+impl BuildState {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            started: Instant::now(),
+            progress: Arc::new(BuildProgress::new()),
+            done: AtomicBool::new(false),
+            error: Mutex::new(None),
+        }
+    }
+
+    fn status(&self) -> serde_json::Value {
+        let mut value = self.progress.to_json();
+        let error = self.error.lock().unwrap().clone();
+        value["path"] = serde_json::json!(self.path);
+        value["ready"] = serde_json::json!(false);
+        value["building"] = serde_json::json!(!self.done.load(Ordering::Acquire) && error.is_none());
+        value["pending"] = serde_json::json!(0);
+        value["generation"] = serde_json::json!(0);
+        value["files"] = serde_json::json!(0);
+        value["elapsed_ms"] = serde_json::json!(self.started.elapsed().as_millis() as u64);
+        value["error"] = serde_json::json!(error);
+        value
+    }
+}
+
 struct Service {
     state: Mutex<State>,
+    building: Mutex<HashMap<PathBuf, Arc<BuildState>>>,
     admission: Mutex<()>,
     models: Arc<ModelPool>,
     token: String,
@@ -300,33 +342,49 @@ fn request_timeout(v: serde_json::Value, whole: Duration) -> Result<serde_json::
     Ok(r)
 }
 
+fn root_status(path: &Path, root: &Root) -> RootStatus {
+    let stats = root.index.stats();
+    RootStatus {
+        path: path.to_path_buf(),
+        ready: root.error.is_none()
+            && !root.lost.load(Ordering::Acquire)
+            && root.pending.load(Ordering::Acquire) == 0,
+        pending: root.pending.load(Ordering::Acquire),
+        generation: stats.generation,
+        files: stats.files,
+        chunks: stats.chunks,
+        error: root.error.clone().or_else(|| {
+            root.lost
+                .load(Ordering::Acquire)
+                .then(|| "watcher lost trust; run wg down, then wg up".into())
+        }),
+        text: root.text.as_ref().map(|t| t.status()),
+        text_error: root.text_error.clone(),
+        text_build_ms: root.text_build_ms,
+        build_ms: root.build_ms,
+        model_ms: root.model_ms,
+    }
+}
+
 fn status(service: &Service) -> serde_json::Value {
-    let state = service.state.lock().unwrap();
-    let roots: Vec<_> = state
-        .roots
-        .iter()
-        .map(|(p, r)| {
-            let s = r.index.stats();
-            RootStatus {
-                path: p.clone(),
-                ready: r.error.is_none()
-                    && !r.lost.load(Ordering::Acquire)
-                    && r.pending.load(Ordering::Acquire) == 0,
-                pending: r.pending.load(Ordering::Acquire),
-                generation: s.generation,
-                files: s.files,
-                chunks: s.chunks,
-                error: r.error.clone().or_else(|| {
-                    r.lost
-                        .load(Ordering::Acquire)
-                        .then(|| "watcher lost trust; run wg down, then wg up".into())
-                }),
-                text: r.text.as_ref().map(|t| t.status()),
-                text_error: r.text_error.clone(),
-                text_build_ms: r.text_build_ms,
-            }
-        })
-        .collect();
+    let (mut roots, attached): (Vec<serde_json::Value>, HashSet<PathBuf>) = {
+        let state = service.state.lock().unwrap();
+        (
+            state
+                .roots
+                .iter()
+                .map(|(p, r)| serde_json::to_value(root_status(p, r)).unwrap())
+                .collect(),
+            state.roots.keys().cloned().collect(),
+        )
+    };
+    // A build that has not published its root yet is still visible. `ready`
+    // stays false, so `wg up` keeps polling and `wg status` shows progress.
+    for (path, build) in service.building.lock().unwrap().iter() {
+        if !attached.contains(path) {
+            roots.push(build.status());
+        }
+    }
     serde_json::json!({"ok":true,"proto":PROTO,"pid":std::process::id(),"model_loads":service.models.loaded_count(),"loaded_models":service.models.loaded_count(),"roots":roots,"uptime_ms":service.started.elapsed().as_millis()})
 }
 fn wait_root(
@@ -366,6 +424,7 @@ fn attach(
     service: &Arc<Service>,
     path: &Path,
     choice: ModelChoice,
+    progress: Option<Arc<BuildProgress>>,
 ) -> Result<(RootStatus, u64, u64)> {
     let _admission = service.admission.lock().unwrap();
     let path = root_key(path);
@@ -427,6 +486,8 @@ fn attach(
                 text: text.as_ref().map(|t| t.status()),
                 text_error,
                 text_build_ms,
+                build_ms: 0,
+                model_ms: 0,
             },
             0,
             0,
@@ -441,6 +502,9 @@ fn attach(
     // Build the text index before subscribing. Its first query reconciles
     // with rg's walker, so nothing between the build and the watcher can make
     // a pruned answer stale.
+    if let Some(progress) = progress.as_ref() {
+        progress.set_stage(wgrep::live::STAGE_TEXT);
+    }
     let (text, text_error, text_build_ms) = match TextIndex::open(&path) {
         Ok(text) => {
             let build_ms = text.build_ms();
@@ -504,11 +568,12 @@ fn attach(
     })?;
     watcher.watch(&path, RecursiveMode::Recursive)?;
     let snapshot_path = snapshot_cache_path(&path, choice);
-    let index = Arc::new(LiveIndex::open_with_cache(
+    let index = Arc::new(LiveIndex::open_with_cache_progress(
         &path,
         choice,
         service.models.clone(),
         Some(snapshot_path),
+        progress.clone(),
     )?);
     let build = index.stats().build_ms;
     let model_ms = index.stats().model_ms;
@@ -530,6 +595,8 @@ fn attach(
             text,
             text_error: text_error.clone(),
             text_build_ms,
+            build_ms: build,
+            model_ms,
         },
     );
     std::thread::Builder::new()
@@ -691,11 +758,91 @@ fn attach(
             text: text_status,
             text_error,
             text_build_ms,
+            build_ms: build,
+            model_ms,
         },
         build,
         model_ms,
     ))
 }
+/// Start a root build and return at once. The build owns its own thread, so
+/// the `up` frame stays far below the frame deadline however large the tree
+/// is. `status` reports the same [`BuildState`] until the root is published.
+fn start_up(
+    service: &Arc<Service>,
+    path: &Path,
+    choice: ModelChoice,
+) -> Result<serde_json::Value> {
+    let path = root_key(path);
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()).into());
+    }
+    {
+        let state = service.state.lock().unwrap();
+        if let Some(root) = state.roots.get(&path) {
+            if root.model != choice {
+                return Err(
+                    "root is already attached with a different model; restart service to change it"
+                        .into(),
+                );
+            }
+            return Ok(serde_json::json!({
+                "ok": true,
+                "building": false,
+                "root": serde_json::to_value(root_status(&path, root))?,
+            }));
+        }
+    }
+    let mut building = service.building.lock().unwrap();
+    if let Some(existing) = building.get(&path).cloned() {
+        let error = existing.error.lock().unwrap().clone();
+        if let Some(error) = error {
+            // A finished failed build: drop it so this up can retry.
+            building.remove(&path);
+            drop(building);
+            return Err(error.into());
+        }
+        return Ok(serde_json::json!({
+            "ok": true,
+            "building": true,
+            "root": existing.status(),
+        }));
+    }
+    if building.len() >= MAX_ROOTS {
+        return Err("service root limit reached".into());
+    }
+    let build = Arc::new(BuildState::new(path.clone()));
+    building.insert(path.clone(), build.clone());
+    drop(building);
+    let svc = service.clone();
+    let p = path.clone();
+    let worker = build.clone();
+    std::thread::Builder::new()
+        .name("wg-root-build".into())
+        .spawn(move || {
+            let result = attach(&svc, &p, choice, Some(worker.progress.clone()));
+            if let Err(error) = result {
+                *worker.error.lock().unwrap() = Some(format!("{error:#}"));
+            }
+            worker.done.store(true, Ordering::Release);
+            // A successful build publishes its root; the build entry is no
+            // longer needed. A failed one stays visible so polling clients and
+            // `wg status` can read the error.
+            if worker.error.lock().unwrap().is_none() {
+                svc.building.lock().unwrap().remove(&p);
+            }
+        })
+        .map_err(|error| {
+            service.building.lock().unwrap().remove(&path);
+            format!("start root build: {error}")
+        })?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "building": true,
+        "root": build.status(),
+    }))
+}
+
 fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value {
     if req["token"].as_str() != Some(&service.token) {
         return serde_json::json!({"ok":false,"error":"authentication failed"});
@@ -715,11 +862,7 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 "text" => ModelChoice::Text,
                 _ => return Err("model must be auto, code, or text".into()),
             };
-            let (r, build, model_ms) = attach(service, &p, c)?;
-            let (text_build_ms, text_error) = (r.text_build_ms, r.text_error.clone());
-            Ok(
-                serde_json::json!({"ok":true,"pid":std::process::id(),"root":r,"build_ms":build,"model_ms":model_ms,"text_build_ms":text_build_ms,"text_error":text_error,"total_ms":req["total_ms"]}),
-            )
+            start_up(service, &p, c)
         }
         "text" => {
             let plan: TextPlan = serde_json::from_value(req["plan"].clone())
@@ -868,6 +1011,7 @@ pub fn daemon(cache: Option<PathBuf>) -> Result<()> {
         state: Mutex::new(State {
             roots: HashMap::new(),
         }),
+        building: Mutex::new(HashMap::new()),
         admission: Mutex::new(()),
         models: Arc::new(ModelPool::new(cache)),
         token: token.clone(),
@@ -956,14 +1100,62 @@ pub fn ensure_running(cache: Option<PathBuf>) -> Result<()> {
     }
 }
 
+/// Attach a root without holding one long request frame open.
+///
+/// `up` starts the build and returns at once. This function then polls
+/// `status` with short frames until the root is ready. Every individual frame
+/// keeps the bounded-IPC rule; the total wall time is unbounded, so a large
+/// tree can build for minutes. A Ctrl-C here only stops this client: the
+/// daemon keeps building, and a later `up` or `status` sees the same build.
 pub fn up(path: &Path, model: &str, cache: Option<PathBuf>) -> Result<serde_json::Value> {
     let start = Instant::now();
     ensure_running(cache)?;
-    let mut v = request(
-        serde_json::json!({"op":"up","path":path,"model":model,"total_ms":start.elapsed().as_millis()}),
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut reply = request_timeout(
+        serde_json::json!({"op":"up","path":path,"model":model}),
+        Duration::from_secs(30),
     )?;
-    v["total_ms"] = serde_json::json!(start.elapsed().as_millis());
-    Ok(v)
+    loop {
+        let root = reply
+            .get("root")
+            .filter(|root| root.is_object())
+            .cloned()
+            .or_else(|| {
+                reply["roots"]
+                    .as_array()?
+                    .iter()
+                    .find(|root| {
+                        root["path"]
+                            .as_str()
+                            .is_some_and(|p| Path::new(p) == canonical)
+                    })
+                    .cloned()
+            });
+        if let Some(root) = root {
+            if root["ready"] == true
+                && (!root["text"].is_null() || root["text_error"].is_string())
+            {
+                let mut value = reply;
+                value["ok"] = serde_json::json!(true);
+                value["building"] = serde_json::json!(false);
+                value["root"] = root.clone();
+                value["build_ms"] = root["build_ms"].clone();
+                value["model_ms"] = root["model_ms"].clone();
+                value["total_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
+                return Ok(value);
+            }
+            if root["building"] != true
+                && let Some(error) = root["error"].as_str()
+            {
+                return Err(error.to_owned().into());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        reply = request_timeout(
+            serde_json::json!({"op":"status"}),
+            Duration::from_secs(30),
+        )?;
+    }
 }
 
 fn spawn(cache: Option<PathBuf>) -> Result<wisp_grep::detached::DetachedChild> {
@@ -1032,6 +1224,7 @@ mod tests {
             state: Mutex::new(State {
                 roots: HashMap::new(),
             }),
+            building: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             models: Arc::new(ModelPool::new(None)),
             token: "t".into(),
@@ -1122,6 +1315,7 @@ mod tests {
             state: Mutex::new(State {
                 roots: HashMap::new(),
             }),
+            building: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             models: Arc::new(ModelPool::new(None)),
             token: "t".into(),
@@ -1140,6 +1334,7 @@ mod tests {
             state: Mutex::new(State {
                 roots: HashMap::new(),
             }),
+            building: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             models: Arc::new(ModelPool::new(None)),
             token: "t".into(),

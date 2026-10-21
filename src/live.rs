@@ -3,6 +3,7 @@ use crate::{
     CODE, Chunk, LoadedModel, ModelChoice, Result, TEXT, cache, identifier_pattern, is_prose,
     make_chunk, rank_impl, words,
 };
+use memmap2::Mmap;
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -10,14 +11,18 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 /// Snapshot cache identity and bounds. Bump `SNAPSHOT_VERSION` when the chunk
 /// ranges or vector layout change, not merely when unrelated ranking changes.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"WGSNAP\0\0";
-const SNAPSHOT_VERSION: u32 = 1;
+/// Version 2 stores the passage vectors once, after all per-file metadata, so
+/// a snapshot can be memory-mapped and served without copying them to the heap.
+const SNAPSHOT_VERSION: u32 = 2;
+/// Fold heap vectors back into a mapped snapshot after this many of them.
+const VECTOR_FOLD_HEAP: usize = 65_536;
 /// An upper bound on cached chunk rows. A cache above it is ignored; a
 /// snapshot above it is not written. Four million rows is 4 GiB of vectors,
 /// far above the 13k-file working set and small enough to bound a bad header.
@@ -241,6 +246,63 @@ impl LexicalIndex {
     }
 }
 
+/// One stored 256-wide f32 passage vector.
+///
+/// A base snapshot keeps its vectors in a memory-mapped file, so the resident
+/// set is file-backed and reclaimable. Edits write only their new vectors to
+/// the heap; a later fold writes them back into a fresh mapped snapshot.
+#[derive(Clone)]
+pub enum VectorRef {
+    Heap(Arc<Vec<f32>>),
+    Mapped { map: Arc<Mmap>, offset: usize },
+}
+
+impl VectorRef {
+    pub fn as_slice(&self) -> &[f32] {
+        match self {
+            VectorRef::Heap(vector) => vector,
+            VectorRef::Mapped { map, offset } => {
+                debug_assert_eq!(offset % std::mem::align_of::<f32>(), 0);
+                // The mapping starts page-aligned and every record is 1024
+                // bytes, so the cast is aligned. The format is little-endian on
+                // the x86_64 targets this crate supports, like the pinned
+                // sgrep index that uses the same cast.
+                unsafe { std::slice::from_raw_parts(map[*offset..].as_ptr().cast(), 256) }
+            }
+        }
+    }
+
+    fn is_mapped(&self) -> bool {
+        matches!(self, VectorRef::Mapped { .. })
+    }
+
+    fn write_bytes(&self, writer: &mut impl Write) -> Result<()> {
+        match self {
+            // The mapped bytes are already the little-endian on-disk form.
+            VectorRef::Mapped { map, offset } => {
+                writer.write_all(&map[*offset..*offset + 256 * 4])?;
+            }
+            VectorRef::Heap(vector) => {
+                let mut bytes = [0u8; 256 * 4];
+                for (slot, value) in bytes.chunks_exact_mut(4).zip(vector.iter()) {
+                    slot.copy_from_slice(&value.to_le_bytes());
+                }
+                writer.write_all(&bytes)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for VectorRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VectorRef::Heap(_) => f.write_str("VectorRef::Heap"),
+            VectorRef::Mapped { offset, .. } => write!(f, "VectorRef::Mapped({offset})"),
+        }
+    }
+}
+
 /// One source file's immutable chunks and their passage vectors.
 ///
 /// Both lists are `Arc`-shared. An unchanged file therefore survives a refresh
@@ -249,7 +311,7 @@ impl LexicalIndex {
 struct FileData {
     digest: [u8; 32],
     chunks: Vec<Arc<Chunk>>,
-    vectors: Vec<Arc<Vec<f32>>>,
+    vectors: Vec<VectorRef>,
     lexical: FileLexical,
 }
 
@@ -261,7 +323,7 @@ struct FileData {
 struct Snapshot {
     files: HashMap<PathBuf, Arc<FileData>>,
     chunks: Vec<Arc<Chunk>>,
-    vectors: Vec<Arc<Vec<f32>>>,
+    vectors: Vec<VectorRef>,
     lexical: Arc<LexicalIndex>,
     model: Arc<LoadedModel>,
     generation: u64,
@@ -294,6 +356,9 @@ pub struct MemoryReport {
     pub counts_key_bytes: u64,
     pub rss_kib: u64,
     pub vector_value_bytes: u64,
+    pub heap_vector_bytes: u64,
+    pub mapped_vectors: usize,
+    pub heap_vectors: usize,
     pub vector_struct_bytes: u64,
     pub vector_arc_headers: u64,
     pub flat_view_bytes: u64,
@@ -319,6 +384,97 @@ pub struct UpdateStats {
     pub changed_files: usize,
     pub encoded_passages: usize,
     pub elapsed_ms: u64,
+}
+
+/// Build stage numbers shared with `wg status`. They only describe progress;
+/// they never change what the index contains.
+pub const STAGE_TEXT: u8 = 1;
+pub const STAGE_DISCOVER: u8 = 2;
+pub const STAGE_READ: u8 = 3;
+pub const STAGE_ASSEMBLE: u8 = 4;
+pub const STAGE_EMBED: u8 = 5;
+pub const STAGE_VERIFY: u8 = 6;
+pub const STAGE_LEXICAL: u8 = 7;
+pub const STAGE_PUBLISH: u8 = 8;
+pub const STAGE_READY: u8 = 9;
+
+fn stage_label(stage: u8) -> &'static str {
+    match stage {
+        STAGE_TEXT => "text",
+        STAGE_DISCOVER => "discover",
+        STAGE_READ => "read",
+        STAGE_ASSEMBLE => "assemble",
+        STAGE_EMBED => "embed",
+        STAGE_VERIFY => "verify",
+        STAGE_LEXICAL => "lexical",
+        STAGE_PUBLISH => "publish",
+        STAGE_READY => "ready",
+        _ => "starting",
+    }
+}
+
+/// Cheap, lock-free build progress for `wg up` and `wg status`.
+///
+/// A large tree can take minutes, so the service returns from `up` at once and
+/// the client polls this state. Every value is an atomic counter, so writers
+/// never block readers.
+#[derive(Default)]
+pub struct BuildProgress {
+    stage: AtomicU64,
+    files_done: AtomicUsize,
+    files_total: AtomicUsize,
+    encoded_done: AtomicUsize,
+    encoded_total: AtomicUsize,
+    chunks: AtomicUsize,
+}
+
+impl BuildProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_stage(&self, stage: u8) {
+        self.stage.store(stage as u64, Ordering::Relaxed);
+    }
+
+    pub fn stage(&self) -> u8 {
+        self.stage.load(Ordering::Relaxed) as u8
+    }
+
+    pub fn set_files(&self, done: usize, total: usize) {
+        self.files_done.store(done, Ordering::Relaxed);
+        self.files_total.store(total, Ordering::Relaxed);
+    }
+
+    pub fn add_files(&self, count: usize) {
+        self.files_done.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn set_encoded(&self, done: usize, total: usize) {
+        self.encoded_done.store(done, Ordering::Relaxed);
+        self.encoded_total.store(total, Ordering::Relaxed);
+    }
+
+    pub fn add_encoded(&self, count: usize) {
+        self.encoded_done.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn set_chunks(&self, chunks: usize) {
+        self.chunks.store(chunks, Ordering::Relaxed);
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let stage = self.stage();
+        serde_json::json!({
+            "stage": stage_label(stage),
+            "stage_code": stage,
+            "files_done": self.files_done.load(Ordering::Relaxed),
+            "files_total": self.files_total.load(Ordering::Relaxed),
+            "chunks": self.chunks.load(Ordering::Relaxed),
+            "encoded_done": self.encoded_done.load(Ordering::Relaxed),
+            "encoded_total": self.encoded_total.load(Ordering::Relaxed),
+        })
+    }
 }
 
 pub struct LiveIndex {
@@ -347,7 +503,7 @@ enum PreparedFile {
         [u8; 32],
         Vec<Arc<Chunk>>,
         Vec<RawChunk>,
-        Vec<Option<Arc<Vec<f32>>>>,
+        Vec<Option<VectorRef>>,
     ),
 }
 
@@ -381,20 +537,53 @@ impl BuildTimings {
     }
 }
 
+/// Bounds-checked slice reader for the mapped snapshot header.
+struct Cursor<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, at: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8]> {
+        let end = self.at.checked_add(len).ok_or("snapshot cursor overflow")?;
+        let slice = self
+            .data
+            .get(self.at..end)
+            .ok_or("snapshot cache is truncated")?;
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into()?))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into()?))
+    }
+
+    fn field(&mut self, cap: usize) -> Result<Vec<u8>> {
+        let len = self.u32()? as usize;
+        if len > cap {
+            return Err("snapshot cache field exceeds bound".into());
+        }
+        Ok(self.take(len)?.to_vec())
+    }
+
+    fn skip(&mut self, len: usize) -> Result<()> {
+        self.take(len)?;
+        Ok(())
+    }
+}
+
 fn read_u32(reader: &mut impl Read) -> Result<u32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
     Ok(u32::from_le_bytes(bytes))
-}
-
-fn read_field(reader: &mut impl Read, cap: usize) -> Result<Vec<u8>> {
-    let len = read_u32(reader)? as usize;
-    if len > cap {
-        return Err("snapshot cache field exceeds bound".into());
-    }
-    let mut bytes = vec![0u8; len];
-    reader.read_exact(&mut bytes)?;
-    Ok(bytes)
 }
 
 fn write_field(writer: &mut impl Write, bytes: &[u8], cap: usize) -> Result<()> {
@@ -452,7 +641,7 @@ struct CachedEntry {
     rel: PathBuf,
     digest: [u8; 32],
     ranges: Vec<(usize, usize)>,
-    vectors: Vec<Arc<Vec<f32>>>,
+    vec_offset: usize,
 }
 
 /// Move one chunk's owned word map into the compact interner input and drop
@@ -475,7 +664,6 @@ struct RebuiltCached {
     digest: [u8; 32],
     chunks: Vec<Arc<Chunk>>,
     raw: Vec<RawChunk>,
-    vectors: Vec<Arc<Vec<f32>>>,
 }
 
 /// Rebuild one cached file from the live bytes. The cached ranges are applied
@@ -496,7 +684,6 @@ fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<RebuiltCached
             digest: entry.digest,
             chunks: Vec::new(),
             raw: Vec::new(),
-            vectors: Vec::new(),
         });
     }
     let source = normalize_source(&bytes);
@@ -518,39 +705,74 @@ fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<RebuiltCached
         digest: entry.digest,
         chunks: rows,
         raw,
-        vectors: entry.vectors.clone(),
     })
 }
 
-fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Result<Snapshot> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic)?;
-    if &magic != SNAPSHOT_MAGIC {
+fn load_snapshot_cache(
+    base: &Path,
+    root: &Path,
+    model: &Arc<LoadedModel>,
+    progress: Option<&BuildProgress>,
+) -> Result<Snapshot> {
+    // Choose the newest generation. A fold writes a new versioned file while
+    // the previous one may still be mapped by another thread or by Windows.
+    let path = snapshot_candidates(base)
+        .into_iter()
+        .filter_map(|path| snapshot_generation(&path).map(|generation| (generation, path)))
+        .max_by_key(|(generation, _)| *generation)
+        .map(|(_, path)| path)
+        .ok_or("snapshot cache missing")?;
+    let file = File::open(&path)?;
+    let map = Arc::new(unsafe { Mmap::map(&file)? });
+    let mut cursor = Cursor::new(&map[..]);
+    if cursor.take(8)? != SNAPSHOT_MAGIC {
         return Err("snapshot cache magic mismatch".into());
     }
-    let version = read_u32(&mut reader)?;
+    let version = cursor.u32()?;
     if version != SNAPSHOT_VERSION {
         return Err(format!("snapshot cache version {version} is unsupported").into());
     }
-    let cached_root = read_field(&mut reader, SNAPSHOT_MAX_META)?;
+    let cached_root = cursor.field(SNAPSHOT_MAX_META)?;
     if cached_root != root.as_os_str().as_encoded_bytes() {
         return Err("snapshot cache root mismatch".into());
     }
-    let cached_model = read_field(&mut reader, SNAPSHOT_MAX_META)?;
+    let cached_model = cursor.field(SNAPSHOT_MAX_META)?;
     if cached_model != model.revision().as_bytes() {
         return Err("snapshot cache model mismatch".into());
     }
-    let file_count = read_u32(&mut reader)? as usize;
-    let total_chunks = read_u32(&mut reader)? as usize;
+    let generation = cursor.u64()?;
+    let file_count = cursor.u32()? as usize;
+    let total_chunks = cursor.u32()? as usize;
+    let meta_len = cursor.u64()? as usize;
+    let vector_base = cursor.u64()? as usize;
     if file_count > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
         return Err("snapshot cache header count exceeds bound".into());
     }
+    if vector_base
+        .checked_add(total_chunks * 256 * 4)
+        .is_none_or(|end| end > map.len())
+    {
+        return Err("snapshot cache vector section exceeds the file".into());
+    }
+    // `VectorRef::as_slice` casts mapped bytes to `f32`; an unaligned base
+    // from a corrupt header must be an error, never an unaligned read.
+    if vector_base % std::mem::align_of::<f32>() != 0 {
+        return Err("snapshot cache vector section is misaligned".into());
+    }
+    // The header ends after the vector-base field; padding follows, then the
+    // metadata block, then the vector table.
+    let meta_start = vector_base
+        .checked_sub(meta_len)
+        .ok_or("snapshot cache metadata length is invalid")?;
+    if meta_start < cursor.at {
+        return Err("snapshot cache metadata overlaps the header".into());
+    }
+    cursor.skip(meta_start - cursor.at)?;
     let mut entries: Vec<CachedEntry> = Vec::with_capacity(file_count.min(4096));
     let mut paths: HashSet<PathBuf> = HashSet::with_capacity(file_count.min(4096));
     let mut seen_chunks = 0usize;
     for _ in 0..file_count {
-        let rel = path_from_bytes(read_field(&mut reader, SNAPSHOT_MAX_PATH)?);
+        let rel = path_from_bytes(cursor.field(SNAPSHOT_MAX_PATH)?);
         if rel.as_os_str().is_empty()
             || rel.is_absolute()
             || rel.components().any(|c| {
@@ -568,8 +790,8 @@ fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Re
             return Err("snapshot cache has a duplicate path".into());
         }
         let mut digest = [0u8; 32];
-        reader.read_exact(&mut digest)?;
-        let chunk_count = read_u32(&mut reader)? as usize;
+        digest.copy_from_slice(cursor.take(32)?);
+        let chunk_count = cursor.u32()? as usize;
         if chunk_count > SNAPSHOT_MAX_CHUNKS
             || seen_chunks
                 .checked_add(chunk_count)
@@ -579,48 +801,57 @@ fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Re
         }
         let mut ranges = Vec::with_capacity(chunk_count.min(1024));
         for _ in 0..chunk_count {
-            let start = read_u32(&mut reader)? as usize;
-            let end = read_u32(&mut reader)? as usize;
+            let start = cursor.u32()? as usize;
+            let end = cursor.u32()? as usize;
             ranges.push((start, end));
         }
-        let mut vectors = Vec::with_capacity(chunk_count.min(1024));
-        for _ in 0..chunk_count {
-            let mut values = Vec::with_capacity(256);
-            let mut raw = [0u8; 4];
-            for _ in 0..256 {
-                reader.read_exact(&mut raw)?;
-                values.push(f32::from_le_bytes(raw));
-            }
-            vectors.push(Arc::new(values));
-        }
+        let vec_offset = vector_base + seen_chunks * 256 * 4;
         seen_chunks += chunk_count;
         entries.push(CachedEntry {
             rel,
             digest,
             ranges,
-            vectors,
+            vec_offset,
         });
     }
     if seen_chunks != total_chunks {
         return Err("snapshot cache chunk total mismatch".into());
     }
-    // Rebuild the per-file rows on the worker pool. A stale or unreadable file
-    // is simply absent from the partial state; the following reconcile
-    // rebuilds it.
-    let rebuilt = parallel_map(&entries, |entry| rebuild_cached_file(root, entry));
-    let mut files = HashMap::with_capacity(rebuilt.len());
+    // Rebuild the per-file rows on the worker pool, in bounded batches. A
+    // stale or unreadable file is simply absent from the partial state; the
+    // following reconcile rebuilds it. Batching keeps chunk text and term
+    // strings for a large tree from all being live at the same time.
+    let mut files = HashMap::with_capacity(entries.len());
     let mut interner = TermInterner::new();
-    for item in rebuilt.into_iter().flatten() {
-        let lexical = interner.intern_file(item.raw);
-        files.insert(
-            item.rel,
-            Arc::new(FileData {
-                digest: item.digest,
-                chunks: item.chunks,
-                vectors: item.vectors,
-                lexical,
-            }),
-        );
+    if let Some(progress) = progress {
+        progress.set_stage(STAGE_READ);
+        progress.set_files(0, entries.len());
+    }
+    for batch in entries.chunks(256) {
+        let rebuilt = parallel_map(batch, |entry| rebuild_cached_file(root, entry));
+        for (item, entry) in rebuilt.into_iter().zip(batch) {
+            let Some(item) = item else { continue };
+            let lexical = interner.intern_file(item.raw);
+            let vectors = (0..item.chunks.len())
+                .map(|i| VectorRef::Mapped {
+                    map: map.clone(),
+                    offset: entry.vec_offset + i * 256 * 4,
+                })
+                .collect();
+            files.insert(
+                item.rel,
+                Arc::new(FileData {
+                    digest: item.digest,
+                    chunks: item.chunks,
+                    vectors,
+                    lexical,
+                }),
+            );
+        }
+        if let Some(progress) = progress {
+            progress.add_files(batch.len());
+            progress.set_chunks(files.values().map(|data| data.chunks.len()).sum());
+        }
     }
     // Publish the same deterministic flat order as `refresh`.
     let mut ordered: Vec<PathBuf> = files.keys().cloned().collect();
@@ -637,13 +868,14 @@ fn load_snapshot_cache(path: &Path, root: &Path, model: &Arc<LoadedModel>) -> Re
         vectors.extend(data.vectors.iter().cloned());
     }
     let lexical = build_lexical(interner.lookup, &files, &ordered, chunks.len());
+    prune_snapshot_versions(base, &path);
     Ok(Snapshot {
         files,
         chunks,
         vectors,
         lexical: Arc::new(lexical),
         model: model.clone(),
-        generation: 1,
+        generation,
     })
 }
 
@@ -774,70 +1006,255 @@ fn update_lexical(
     }
 }
 
-/// Write the v1 snapshot cache atomically. A failure is reported to the caller
-/// but never changes the published index.
-fn write_snapshot_cache(path: &Path, root: &Path, snapshot: &Snapshot) -> Result<()> {
-    let total_chunks: usize = snapshot.files.values().map(|d| d.chunks.len()).sum();
-    if snapshot.files.len() > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
-        return Err("snapshot exceeds cache bounds".into());
+/// Versioned data file for one generation. Generation 1 keeps the base name so
+/// a first build and the tests see a stable file; later folds use a new name so
+/// an old memory mapping is never replaced in place (a Windows rule).
+fn snapshot_version_path(base: &Path, generation: u64) -> PathBuf {
+    if generation <= 1 {
+        return base.to_path_buf();
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let name = path
+    let name = base
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("snapshot");
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let stem = name.strip_suffix(".wgsnap").unwrap_or(name);
+    base.with_file_name(format!("{stem}.g{generation}.wgsnap"))
+}
+
+/// All data files that belong to `base`, including the base name and any
+/// versioned folds.
+fn snapshot_candidates(base: &Path) -> Vec<PathBuf> {
+    let Some(parent) = base.parent() else {
+        return Vec::new();
+    };
+    let Some(name) = base.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let stem = name.strip_suffix(".wgsnap").unwrap_or(name);
+    let prefix = format!("{stem}.g");
+    let mut out = Vec::new();
+    if base.is_file() {
+        out.push(base.to_path_buf());
+    }
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let candidate = entry.file_name();
+            let Some(candidate) = candidate.to_str() else {
+                continue;
+            };
+            if candidate == name
+                || (candidate.starts_with(&prefix) && candidate.ends_with(".wgsnap"))
+            {
+                let path = entry.path();
+                if path.is_file() {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn skip_field(reader: &mut impl Read, cap: usize) -> Result<()> {
+    let len = read_u32(reader)? as usize;
+    if len > cap {
+        return Err("snapshot cache field exceeds bound".into());
+    }
+    let mut remaining = len;
+    let mut buffer = [0u8; 4096];
+    while remaining > 0 {
+        let take = remaining.min(buffer.len());
+        reader.read_exact(&mut buffer[..take])?;
+        remaining -= take;
+    }
+    Ok(())
+}
+
+/// Read just the generation from a snapshot header, without mapping the file.
+fn snapshot_generation(path: &Path) -> Option<u64> {
+    let mut reader = BufReader::new(File::open(path).ok()?);
+    let mut magic = [0u8; 8];
+    reader.read_exact(&mut magic).ok()?;
+    if &magic != SNAPSHOT_MAGIC {
+        return None;
+    }
+    if read_u32(&mut reader).ok()? != SNAPSHOT_VERSION {
+        return None;
+    }
+    skip_field(&mut reader, SNAPSHOT_MAX_META).ok()?;
+    skip_field(&mut reader, SNAPSHOT_MAX_META).ok()?;
+    let mut raw = [0u8; 8];
+    reader.read_exact(&mut raw).ok()?;
+    Some(u64::from_le_bytes(raw))
+}
+
+/// Encode the missing vectors and keep every vector on the heap. Used for the
+/// no-cache path (tests, one-shot callers) and as the fallback when a fold
+/// cannot be written. Batch composition is identical to the fold path.
+fn embed_heap_vectors(
+    chunks: &[Arc<Chunk>],
+    slots: &[Option<VectorRef>],
+    missing: &[usize],
+    model: &LoadedModel,
+    progress: Option<&BuildProgress>,
+) -> Result<Vec<VectorRef>> {
+    if let Some(progress) = progress {
+        progress.set_stage(STAGE_EMBED);
+        progress.set_encoded(0, missing.len());
+    }
+    let mut embedded: Vec<VectorRef> = Vec::with_capacity(missing.len());
+    for batch in missing.chunks(512) {
+        let texts: Vec<String> = batch
+            .iter()
+            .map(|&i| format!("{}\n{}", chunks[i].path, chunks[i].content))
+            .collect();
+        embedded.extend(
+            model
+                .embed_parallel(&texts)?
+                .into_iter()
+                .map(|vector| VectorRef::Heap(Arc::new(vector))),
+        );
+        if let Some(progress) = progress {
+            progress.add_encoded(batch.len());
+        }
+    }
+    let mut embedded = embedded.into_iter();
+    Ok(slots
+        .iter()
+        .map(|slot| slot.clone().unwrap_or_else(|| embedded.next().unwrap()))
+        .collect())
+}
+
+/// The mapped result of folding a generation back to disk.
+struct FoldedSnapshot {
+    map: Arc<Mmap>,
+    vector_base: usize,
+    path: PathBuf,
+    generation: u64,
+}
+
+/// Write a complete v2 snapshot: header, per-file metadata, then one contiguous
+/// vector table. Vectors are written in chunk-id order; a missing (None) slot is
+/// embedded by `embed` in the same 512-row batches the heap path uses, so the
+/// embedding inputs and outputs do not change. The caller never holds all
+/// vectors on the heap.
+#[allow(clippy::too_many_arguments)]
+fn write_snapshot_folded(
+    base: &Path,
+    root: &Path,
+    model: &LoadedModel,
+    generation: u64,
+    ordered: &[PathBuf],
+    files: &HashMap<PathBuf, Arc<FileData>>,
+    chunks: &[Arc<Chunk>],
+    slots: &[Option<VectorRef>],
+    missing: &[usize],
+    progress: Option<&BuildProgress>,
+) -> Result<FoldedSnapshot> {
+    let total_chunks = chunks.len();
+    if files.len() > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
+        return Err("snapshot exceeds cache bounds".into());
+    }
+    let mut meta = Vec::new();
+    for rel in ordered {
+        let data = &files[rel];
+        write_field(
+            &mut meta,
+            rel.as_os_str().as_encoded_bytes(),
+            SNAPSHOT_MAX_PATH,
+        )?;
+        meta.extend_from_slice(&data.digest);
+        meta.extend_from_slice(&(data.chunks.len() as u32).to_le_bytes());
+        for chunk in &data.chunks {
+            if chunk.start > u32::MAX as usize || chunk.end > u32::MAX as usize {
+                return Err("snapshot cache range exceeds u32".into());
+            }
+            meta.extend_from_slice(&(chunk.start as u32).to_le_bytes());
+            meta.extend_from_slice(&(chunk.end as u32).to_le_bytes());
+        }
+    }
+    let mut header = Vec::new();
+    header.extend_from_slice(SNAPSHOT_MAGIC);
+    header.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+    write_field(
+        &mut header,
+        root.as_os_str().as_encoded_bytes(),
+        SNAPSHOT_MAX_META,
+    )?;
+    write_field(
+        &mut header,
+        model.revision().as_bytes(),
+        SNAPSHOT_MAX_META,
+    )?;
+    header.extend_from_slice(&generation.to_le_bytes());
+    header.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    header.extend_from_slice(&(total_chunks as u32).to_le_bytes());
+    // Pad the metadata to four bytes, then pad the header so the f32 table is
+    // four-byte aligned. The reader uses `meta_len` and `vector_base` to find
+    // the metadata and skip the header padding.
+    meta.extend(std::iter::repeat_n(0u8, (4 - meta.len() % 4) % 4));
+    header.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+    let header_prefix = header.len() + 8;
+    let pad = (4 - (header_prefix + meta.len()) % 4) % 4;
+    let vector_base = header_prefix + pad + meta.len();
+    header.extend_from_slice(&(vector_base as u64).to_le_bytes());
+    header.extend(std::iter::repeat_n(0u8, pad));
+
+    if let Some(parent) = base.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let dest = snapshot_version_path(base, generation);
+    let name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    let tmp = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     let result = (|| -> Result<()> {
         let mut writer = BufWriter::new(File::create(&tmp)?);
-        writer.write_all(SNAPSHOT_MAGIC)?;
-        writer.write_all(&SNAPSHOT_VERSION.to_le_bytes())?;
-        write_field(
-            &mut writer,
-            root.as_os_str().as_encoded_bytes(),
-            SNAPSHOT_MAX_META,
-        )?;
-        write_field(
-            &mut writer,
-            snapshot.model.revision().as_bytes(),
-            SNAPSHOT_MAX_META,
-        )?;
-        writer.write_all(&(snapshot.files.len() as u32).to_le_bytes())?;
-        writer.write_all(&(total_chunks as u32).to_le_bytes())?;
-        let mut ordered: Vec<&PathBuf> = snapshot.files.keys().collect();
-        ordered.sort_unstable_by(|a, b| {
-            a.as_os_str()
-                .as_encoded_bytes()
-                .cmp(b.as_os_str().as_encoded_bytes())
-        });
-        for rel in ordered {
-            let data = &snapshot.files[rel];
-            if data.chunks.len() != data.vectors.len() {
-                return Err("snapshot cache row count mismatch".into());
-            }
-            write_field(
-                &mut writer,
-                rel.as_os_str().as_encoded_bytes(),
-                SNAPSHOT_MAX_PATH,
-            )?;
-            writer.write_all(&data.digest)?;
-            writer.write_all(&(data.chunks.len() as u32).to_le_bytes())?;
-            for chunk in &data.chunks {
-                if chunk.start > u32::MAX as usize || chunk.end > u32::MAX as usize {
-                    return Err("snapshot cache range exceeds u32".into());
-                }
-                writer.write_all(&(chunk.start as u32).to_le_bytes())?;
-                writer.write_all(&(chunk.end as u32).to_le_bytes())?;
-            }
-            for vector in &data.vectors {
-                if vector.len() != 256 {
-                    return Err("snapshot cache vector width is not 256".into());
-                }
-                for value in vector.iter() {
-                    writer.write_all(&value.to_le_bytes())?;
+        writer.write_all(&header)?;
+        writer.write_all(&meta)?;
+        let mut batches = missing.chunks(512);
+        let mut batch: Vec<Vec<f32>> = Vec::new();
+        let mut batch_at = 0usize;
+        let mut embedded = 0usize;
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_EMBED);
+            progress.set_encoded(0, missing.len());
+        }
+        for id in 0..total_chunks {
+            match &slots[id] {
+                Some(vector) => vector.write_bytes(&mut writer)?,
+                None => {
+                    if batch_at >= batch.len() {
+                        let ids = batches
+                            .next()
+                            .ok_or("snapshot vector slot has no embedding batch")?;
+                        let texts: Vec<String> = ids
+                            .iter()
+                            .map(|&i| format!("{}\n{}", chunks[i].path, chunks[i].content))
+                            .collect();
+                        batch = model.embed_parallel(&texts)?;
+                        batch_at = 0;
+                    }
+                    let vector = &batch[batch_at];
+                    if vector.len() != 256 {
+                        return Err("snapshot cache vector width is not 256".into());
+                    }
+                    for value in vector.iter() {
+                        writer.write_all(&value.to_le_bytes())?;
+                    }
+                    batch_at += 1;
+                    embedded += 1;
+                    if let Some(progress) = progress {
+                        progress.add_encoded(1);
+                    }
                 }
             }
+        }
+        if embedded != missing.len() || batches.next().is_some() {
+            return Err("snapshot vector count mismatch".into());
         }
         writer.flush()?;
         writer.get_ref().sync_all()?;
@@ -845,12 +1262,33 @@ fn write_snapshot_cache(path: &Path, root: &Path, snapshot: &Snapshot) -> Result
     })();
     match result {
         Ok(()) => {
-            std::fs::rename(&tmp, path)?;
-            Ok(())
+            if dest.exists() {
+                let _ = std::fs::remove_file(&dest);
+            }
+            std::fs::rename(&tmp, &dest)?;
+            let file = File::open(&dest)?;
+            let map = unsafe { Mmap::map(&file)? };
+            let _ = file.set_modified(std::time::SystemTime::now());
+            Ok(FoldedSnapshot {
+                map: Arc::new(map),
+                vector_base,
+                path: dest,
+                generation,
+            })
         }
         Err(error) => {
             let _ = std::fs::remove_file(&tmp);
             Err(error)
+        }
+    }
+}
+
+/// Remove superseded snapshot files. Best effort: on Windows an old mapping can
+/// delay a delete until the daemon next starts.
+fn prune_snapshot_versions(base: &Path, keep: &Path) {
+    for candidate in snapshot_candidates(base) {
+        if candidate != keep {
+            let _ = std::fs::remove_file(candidate);
         }
     }
 }
@@ -946,6 +1384,18 @@ impl LiveIndex {
         models: Arc<ModelPool>,
         cache: Option<PathBuf>,
     ) -> Result<LiveIndex> {
+        Self::open_with_cache_progress(root, choice, models, cache, None)
+    }
+
+    /// The same open path with optional lock-free build progress. The service
+    /// uses it so `wg status` can report a long build while it runs.
+    pub fn open_with_cache_progress(
+        root: &Path,
+        choice: ModelChoice,
+        models: Arc<ModelPool>,
+        cache: Option<PathBuf>,
+        progress: Option<Arc<BuildProgress>>,
+    ) -> Result<LiveIndex> {
         let started = Instant::now();
         let mut phase = Instant::now();
         let root = root.canonicalize()?;
@@ -985,7 +1435,10 @@ impl LiveIndex {
             cache_ready: AtomicBool::new(false),
         };
         if let Some(path) = index.cache.clone() {
-            match load_snapshot_cache(&path, &index.root, &initial_model) {
+            if let Some(progress) = progress.as_ref() {
+                progress.set_stage(STAGE_DISCOVER);
+            }
+            match load_snapshot_cache(&path, &index.root, &initial_model, progress.as_deref()) {
                 Ok(loaded) => {
                     let rows = loaded.chunks.len();
                     let files = loaded.files.len();
@@ -1003,7 +1456,10 @@ impl LiveIndex {
             }
             mark("cache_load", &mut phase);
         }
-        index.refresh(&[], true)?;
+        index.refresh_with_progress(&[], true, progress.as_deref())?;
+        if let Some(progress) = progress.as_ref() {
+            progress.set_stage(STAGE_READY);
+        }
         trim_allocator();
         if std::env::var_os("WG_LIVE_TIMING").is_some() {
             eprintln!("wg live: open_total={}ms", started.elapsed().as_millis());
@@ -1027,10 +1483,10 @@ impl LiveIndex {
             chunk_struct_bytes: (n * std::mem::size_of::<Chunk>()) as u64,
             chunk_arc_headers: (n * 2 * std::mem::size_of::<usize>()) as u64,
             vector_value_bytes: (n * 256 * std::mem::size_of::<f32>()) as u64,
-            vector_struct_bytes: (n * std::mem::size_of::<Vec<f32>>()) as u64,
-            vector_arc_headers: (n * 2 * std::mem::size_of::<usize>()) as u64,
-            flat_view_bytes: ((s.chunks.capacity() + s.vectors.capacity())
-                * std::mem::size_of::<usize>()) as u64,
+            vector_struct_bytes: (n * std::mem::size_of::<VectorRef>()) as u64,
+            flat_view_bytes: (s.chunks.capacity() * std::mem::size_of::<Arc<Chunk>>()
+                + s.vectors.capacity() * std::mem::size_of::<VectorRef>())
+                as u64,
             file_map_bytes: (s.files.capacity()
                 * (std::mem::size_of::<PathBuf>()
                     + std::mem::size_of::<Arc<FileData>>()
@@ -1041,8 +1497,10 @@ impl LiveIndex {
         for (path, data) in &s.files {
             report.file_map_bytes += path.as_os_str().len() as u64;
             report.file_data_bytes += std::mem::size_of::<FileData>() as u64;
-            report.file_data_bytes += ((data.chunks.capacity() + data.vectors.capacity())
-                * std::mem::size_of::<usize>()) as u64;
+            report.file_data_bytes += (data.chunks.capacity()
+                * std::mem::size_of::<Arc<Chunk>>()
+                + data.vectors.capacity() * std::mem::size_of::<VectorRef>())
+                as u64;
             report.file_data_bytes += (data.lexical.terms.capacity()
                 * std::mem::size_of::<(u32, u32)>()
                 + data.lexical.offsets.capacity() * std::mem::size_of::<u32>()
@@ -1060,6 +1518,15 @@ impl LiveIndex {
                 for key in chunk.counts.keys() {
                     report.counts_key_bytes += key.capacity() as u64;
                 }
+            }
+        }
+        for vector in &s.vectors {
+            match vector {
+                VectorRef::Heap(values) => {
+                    report.heap_vectors += 1;
+                    report.heap_vector_bytes += (values.capacity() * 4) as u64;
+                }
+                VectorRef::Mapped { .. } => report.mapped_vectors += 1,
             }
         }
         let index = &s.lexical;
@@ -1097,9 +1564,8 @@ impl LiveIndex {
             + report.path_bytes
             + report.counts_table_bytes
             + report.counts_key_bytes
-            + report.vector_value_bytes
+            + report.heap_vector_bytes
             + report.vector_struct_bytes
-            + report.vector_arc_headers
             + report.flat_view_bytes
             + report.file_map_bytes
             + report.file_data_bytes
@@ -1131,6 +1597,15 @@ impl LiveIndex {
     /// revision changed. A refresh that finds no change keeps the published
     /// generation and does not rebuild any row.
     pub fn refresh(&self, paths: &[PathBuf], reconcile: bool) -> Result<UpdateStats> {
+        self.refresh_with_progress(paths, reconcile, None)
+    }
+
+    fn refresh_with_progress(
+        &self,
+        paths: &[PathBuf],
+        reconcile: bool,
+        progress: Option<&BuildProgress>,
+    ) -> Result<UpdateStats> {
         // Prepare off the query lock, but serialize writers so a slower update
         // cannot replace a newer snapshot made from a different old generation.
         let _update = self
@@ -1167,7 +1642,7 @@ impl LiveIndex {
         };
         let mut changed_paths: HashSet<PathBuf> = HashSet::new();
         // A changed file can reuse the vector of any chunk `Arc` it kept.
-        let mut reused_vectors: HashMap<PathBuf, Vec<Option<Arc<Vec<f32>>>>> = HashMap::new();
+        let mut reused_vectors: HashMap<PathBuf, Vec<Option<VectorRef>>> = HashMap::new();
         // Chunk ids are stable only when no path appears or disappears and no
         // changed file gains or loses a chunk. The common single-file edit does.
         let mut layout_same = !reconcile || old.files.keys().all(|path| target.contains(path));
@@ -1189,59 +1664,80 @@ impl LiveIndex {
             }
         }
         let timings = BuildTimings::default();
-        let prepared: Vec<Result<PreparedFile>> = selected
-            .par_iter()
-            .map(|rel| prepare_file(&self.root, rel, &old.files, &timings))
-            .collect();
-        for item in prepared {
-            match item? {
-                PreparedFile::Removed(rel) => {
-                    if files.remove(&rel).is_some() {
-                        changed_paths.insert(rel);
-                        layout_same = false;
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_READ);
+            progress.set_files(0, selected.len());
+            progress.set_chunks(files.values().map(|data| data.chunks.len()).sum());
+        }
+        // Read and intern in bounded batches. The old path collected every
+        // file's chunks and term strings before it applied any of them, so a
+        // 1.6 GB tree held a second copy of its text plus the term lists all at
+        // once. A batch drops both before the next read starts.
+        const PREPARE_BATCH: usize = 256;
+        let mut live_chunks: usize = files.values().map(|data| data.chunks.len()).sum();
+        for batch in selected.chunks(PREPARE_BATCH) {
+            let prepared: Vec<Result<PreparedFile>> = batch
+                .par_iter()
+                .map(|rel| prepare_file(&self.root, rel, &old.files, &timings))
+                .collect();
+            for item in prepared {
+                match item? {
+                    PreparedFile::Removed(rel) => {
+                        if let Some(removed) = files.remove(&rel) {
+                            live_chunks = live_chunks.saturating_sub(removed.chunks.len());
+                            changed_paths.insert(rel);
+                            layout_same = false;
+                        }
+                    }
+                    PreparedFile::Unchanged => {}
+                    PreparedFile::Empty(rel, digest) => {
+                        if let Some(previous) = old.files.get(&rel) {
+                            if !previous.chunks.is_empty() {
+                                layout_same = false;
+                            }
+                            live_chunks = live_chunks.saturating_sub(previous.chunks.len());
+                        }
+                        changed_paths.insert(rel.clone());
+                        files.insert(
+                            rel,
+                            Arc::new(FileData {
+                                digest,
+                                chunks: Vec::new(),
+                                vectors: Vec::new(),
+                                lexical: FileLexical::default(),
+                            }),
+                        );
+                    }
+                    PreparedFile::Rebuilt(rel, digest, chunks, raw, reused) => {
+                        if old.files.get(&rel).map(|data| data.chunks.len())
+                            != Some(chunks.len())
+                        {
+                            layout_same = false;
+                        }
+                        if let Some(previous) = old.files.get(&rel) {
+                            live_chunks = live_chunks.saturating_sub(previous.chunks.len());
+                        }
+                        live_chunks += chunks.len();
+                        let intern = interner
+                            .get_or_insert_with(|| TermInterner::from_lookup(&old.lexical.lookup));
+                        let lexical = intern.intern_file(raw);
+                        changed_paths.insert(rel.clone());
+                        reused_vectors.insert(rel.clone(), reused);
+                        files.insert(
+                            rel,
+                            Arc::new(FileData {
+                                digest,
+                                chunks,
+                                vectors: Vec::new(),
+                                lexical,
+                            }),
+                        );
                     }
                 }
-                PreparedFile::Unchanged => {}
-                PreparedFile::Empty(rel, digest) => {
-                    if old
-                        .files
-                        .get(&rel)
-                        .is_some_and(|data| !data.chunks.is_empty())
-                    {
-                        layout_same = false;
-                    }
-                    changed_paths.insert(rel.clone());
-                    files.insert(
-                        rel,
-                        Arc::new(FileData {
-                            digest,
-                            chunks: Vec::new(),
-                            vectors: Vec::new(),
-                            lexical: FileLexical::default(),
-                        }),
-                    );
-                }
-                PreparedFile::Rebuilt(rel, digest, chunks, raw, reused) => {
-                    if old.files.get(&rel).map(|data| data.chunks.len())
-                        != Some(chunks.len())
-                    {
-                        layout_same = false;
-                    }
-                    let intern = interner
-                        .get_or_insert_with(|| TermInterner::from_lookup(&old.lexical.lookup));
-                    let lexical = intern.intern_file(raw);
-                    changed_paths.insert(rel.clone());
-                    reused_vectors.insert(rel.clone(), reused);
-                    files.insert(
-                        rel,
-                        Arc::new(FileData {
-                            digest,
-                            chunks,
-                            vectors: Vec::new(),
-                            lexical,
-                        }),
-                    );
-                }
+            }
+            if let Some(progress) = progress {
+                progress.add_files(batch.len());
+                progress.set_chunks(live_chunks);
             }
         }
         if reconcile {
@@ -1293,9 +1789,6 @@ impl LiveIndex {
                     );
                 }
             }
-            if self.should_write_cache(reconcile, 0) {
-                self.write_cache(&old);
-            }
             return Ok(UpdateStats {
                 changed_files: 0,
                 encoded_passages: 0,
@@ -1308,12 +1801,15 @@ impl LiveIndex {
                 .as_encoded_bytes()
                 .cmp(b.as_os_str().as_encoded_bytes())
         });
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_ASSEMBLE);
+        }
         // Assemble the flat row views. Unchanged files contribute their existing
         // Arcs; changed files contribute rebuilt chunks and reuse a vector only
         // when the chunk Arc and the model revision both survived.
         let total: usize = files.values().map(|d| d.chunks.len()).sum();
         let mut chunks: Vec<Arc<Chunk>> = Vec::with_capacity(total);
-        let mut slots: Vec<Option<Arc<Vec<f32>>>> = Vec::with_capacity(total);
+        let mut slots: Vec<Option<VectorRef>> = Vec::with_capacity(total);
         let mut missing: Vec<usize> = Vec::new();
         let mut spans: Vec<(PathBuf, usize, usize)> = Vec::new();
         let mut file_starts: HashMap<PathBuf, (usize, usize)> = HashMap::new();
@@ -1346,23 +1842,59 @@ impl LiveIndex {
         }
         mark("assemble_rows", &mut phase);
         let encoded = missing.len();
-        // Encode in bounded batches. The old path materialized one passage
-        // string for every chunk at once; batching keeps that copy transient.
-        let mut embedded: Vec<Arc<Vec<f32>>> = Vec::with_capacity(encoded);
-        for batch in missing.chunks(512) {
-            let texts: Vec<String> = batch
-                .iter()
-                .map(|&i| format!("{}\n{}", chunks[i].path, chunks[i].content))
-                .collect();
-            embedded.extend(model.embed_parallel(&texts)?.into_iter().map(Arc::new));
-        }
+        let heap_vectors = slots
+            .iter()
+            .filter(|slot| matches!(slot, Some(VectorRef::Heap(_))))
+            .count();
+        // Fold when there is no mapped base, when ids moved, when too many heap
+        // vectors accumulated, or when a cache refresh was already due. A fold
+        // writes vectors directly to disk, so a full build never holds the
+        // whole vector table in the heap.
+        let fold = self.cache.is_some()
+            && (!layout_same
+                || old.vectors.iter().all(|vector| !vector.is_mapped())
+                || heap_vectors + missing.len() > VECTOR_FOLD_HEAP
+                || self.should_write_cache(reconcile, changed));
+        let mut folded: Option<FoldedSnapshot> = None;
+        let vectors: Vec<VectorRef> = if fold {
+            let base = self.cache.as_deref().unwrap();
+            let result = write_snapshot_folded(
+                base,
+                &self.root,
+                &model,
+                old.generation + 1,
+                &ordered,
+                &files,
+                &chunks,
+                &slots,
+                &missing,
+                progress,
+            );
+            match result {
+                Ok(result) => {
+                    let vectors = (0..chunks.len())
+                        .map(|i| VectorRef::Mapped {
+                            map: result.map.clone(),
+                            offset: result.vector_base + i * 256 * 4,
+                        })
+                        .collect();
+                    folded = Some(result);
+                    vectors
+                }
+                Err(error) => {
+                    if std::env::var_os("WG_LIVE_TIMING").is_some() {
+                        eprintln!("wg live: fold_failed reason={error}; using heap vectors");
+                    }
+                    embed_heap_vectors(&chunks, &slots, &missing, &model, progress)?
+                }
+            }
+        } else {
+            embed_heap_vectors(&chunks, &slots, &missing, &model, progress)?
+        };
         mark("embed", &mut phase);
-        let mut embedded = embedded.into_iter();
-        let vectors: Vec<Arc<Vec<f32>>> = slots
-            .into_iter()
-            .map(|slot| slot.unwrap_or_else(|| embedded.next().unwrap()))
-            .collect();
-        debug_assert!(embedded.next().is_none());
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_VERIFY);
+        }
         // Verify only the input paths. Ordinary file updates must not rescan the
         // unchanged repository; full reconciles additionally recheck membership.
         for rel in &target {
@@ -1382,10 +1914,24 @@ impl LiveIndex {
             }
         }
         mark("verify", &mut phase);
-        // Store each rebuilt file's vectors beside its chunks, so the next
-        // refresh can share them again without any lookup.
-        for (rel, start, len) in spans {
-            let data = files.get(&rel).unwrap();
+        // Store each file's vectors beside its chunks, so the next refresh can
+        // share them again without any lookup. A fold replaces the whole
+        // mapped base, so every file points into the new map; otherwise only
+        // the rebuilt spans change.
+        let refolded = folded.is_some();
+        let touched: Vec<(PathBuf, usize, usize)> = if refolded {
+            ordered
+                .iter()
+                .map(|rel| {
+                    let (start, len) = file_starts[rel];
+                    (rel.clone(), start, len)
+                })
+                .collect()
+        } else {
+            spans
+        };
+        for (rel, start, len) in touched {
+            let data = files.get(&rel).unwrap().clone();
             files.insert(
                 rel,
                 Arc::new(FileData {
@@ -1395,6 +1941,9 @@ impl LiveIndex {
                     lexical: data.lexical.clone(),
                 }),
             );
+        }
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_LEXICAL);
         }
         let lookup = interner
             .map(|intern| intern.lookup)
@@ -1427,6 +1976,9 @@ impl LiveIndex {
         } else {
             Arc::new(build_lexical(lookup, &files, &ordered, chunks.len()))
         };
+        if let Some(progress) = progress {
+            progress.set_stage(STAGE_PUBLISH);
+        }
         let next = Arc::new(Snapshot {
             files,
             chunks,
@@ -1440,8 +1992,12 @@ impl LiveIndex {
             .write()
             .map_err(|_| "live index snapshot poisoned")? = next.clone();
         mark("publish", &mut phase);
-        if self.should_write_cache(reconcile, changed) {
-            self.write_cache(&next);
+        if let Some(folded) = folded {
+            self.cache_ready.store(true, Ordering::Relaxed);
+            if let Some(base) = self.cache.as_deref() {
+                prune_snapshot_versions(base, &folded.path);
+                let _ = folded.generation;
+            }
         }
         if !layout_same || encoded >= 512 {
             drop(old);
@@ -1461,24 +2017,6 @@ impl LiveIndex {
             && (!self.cache_ready.load(Ordering::Relaxed)
                 || (reconcile && changed > 0)
                 || changed >= SNAPSHOT_REWRITE_FILES)
-    }
-
-    /// A failed cache write never fails the index and never changes what a
-    /// query sees. It is silent unless `WG_LIVE_TIMING` asks for diagnostics.
-    fn write_cache(&self, snapshot: &Snapshot) {
-        let Some(path) = self.cache.as_deref() else {
-            return;
-        };
-        let mut phase = Instant::now();
-        match write_snapshot_cache(path, &self.root, snapshot) {
-            Ok(()) => self.cache_ready.store(true, Ordering::Relaxed),
-            Err(error) => {
-                if std::env::var_os("WG_LIVE_TIMING").is_some() {
-                    eprintln!("wg live: cache_write_failed reason={error}");
-                }
-            }
-        }
-        mark("cache_write", &mut phase);
     }
 
     fn relative(&self, p: &Path) -> Result<PathBuf> {
@@ -1534,7 +2072,7 @@ impl LiveIndex {
         let similarities: Vec<f64> = snapshot
             .vectors
             .iter()
-            .map(|v| v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>() as f64)
+            .map(|v| v.as_slice().iter().zip(&q).map(|(a, b)| a * b).sum::<f32>() as f64)
             .collect();
         let exact: HashSet<_> = identifier_pattern(query)?
             .into_iter()
@@ -1932,7 +2470,7 @@ mod tests {
         file_data(live, rel)
             .vectors
             .iter()
-            .map(|vector| vector.as_ref().clone())
+            .map(|vector| vector.as_slice().to_vec())
             .collect()
     }
 
