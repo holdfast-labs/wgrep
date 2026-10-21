@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """wg launch benchmark: honest comparison-style measurements on one VPS.
 
+Phase D campaign (2026-10-21) for the final single-binary ``wg``: semantic
+ranking plus the built-in ripgrep 15.1 text route and its trigram index in one
+daemon.
+
 Measurements (all raw per-sample records retained):
 
 1. Freshness: one-file edit -> first query that returns the new symbol.
@@ -11,14 +15,19 @@ Measurements (all raw per-sample records retained):
    Throughput, p50/p95, errors/timeouts, daemon RSS vs summed sgrep RSS.
 4. Multi-repo memory: 1, 3, 5 attached repos on one wg daemon vs one sgrep
    process per repo.
-5. Text-route overhead: ``wg -F X .`` vs direct ``rg -F X .`` for an absent
-   literal and a common identifier.
-6. "grep can't find it": eight natural-language questions with hand-verified
-   answer locations; wg top-1/top-5 versus keyword rg.
+5. Text route: absent, rare, common, broad regex and case-insensitive cases
+   against direct rg 15.1.0, with byte-exact sorted output parity and the
+   index-mode event. Then 1, 4, 16 and 32 concurrent clients.
+6. Setup: ``wg up`` wall time, peak RSS and steady RSS on the Rust corpus and
+   (when enabled) the Linux kernel tree.
+
+The optional ``demo`` phase keeps the earlier natural-language check; quality
+numbers for the launch are in ``bench/WG_QUALITY_REPORT.md``.
 
 Only this file writes outputs. It never edits the source corpus: it copies it.
-Every subprocess has a timeout and a return-code check. Daemons are isolated by
-WG_SERVICE_DIR and only task-owned services are stopped.
+Every subprocess has a timeout and a return-code check. Daemons and text
+indexes are isolated by WG_SERVICE_DIR and WGREP_INDEX_DIR. Only task-owned
+services are stopped.
 
 Results JSON is flat: one key per headline metric, units in key names.
 """
@@ -31,21 +40,42 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-DEFAULT_WG = '/srv/projects/wispd/wg-release-20261018/crates/wgrep-sgrep-core/target/release/wg'
+DEFAULT_WG = os.environ.get(
+    'WG_BIN', '/srv/projects/wispd/wg-d-20261021/target/release/wg')
 DEFAULT_SGREP = '/srv/projects/wispd/sgrep-control-0fbe8e5/target/release/sgrep'
 DEFAULT_RG = '/srv/workspaces/wispd/tools/rg-15/rg'
 DEFAULT_CORPUS = '/srv/workspaces/wispd/prof/src'
+DEFAULT_LINUX = '/srv/workspaces/wispd/corpora/linux-7.2.9'
 DEFAULT_HF_HUB = '/home/agent/.cache/huggingface/hub'
 DEFAULT_TS_PACK = '/home/agent/.cache/tree-sitter-language-pack'
 CONTROL_SHA256 = '715946fa0f17006905b5f0d0bbf1f21c00e355882855ec40c44c14e78a3c6217'
 RG_VERSION = '15.1.0'
 MODEL = 'code'
+
+TEXT_ABSENT = 'zzqxjwvbnm_wg_text_absent_zzz'
+TEXT_RARE_POOL = [
+    'testable', 'latebound', 'associtem', 'genericargs', 'traitref',
+    'implitem', 'tokenstream', 'diagnosticitem', 'unreachablepatterns',
+    'hirplaceholder',
+]
+TEXT_COMMON_POOL = ['not', 'parse', 'error', 'self', 'impl', 'let']
+
+# A ``-n`` (line-number) flag keeps the invocation on the text route: a bare
+# PATTERN is semantic in ``wg``. ``-F`` also selects ripgrep.
+TEXT_QUERY_SPECS = [
+    {'name': 'absent_literal', 'args': ['-F'], 'pattern': TEXT_ABSENT},
+    {'name': 'rare_identifier', 'args': ['-F'], 'pattern': None},
+    {'name': 'common_identifier', 'args': ['-F'], 'pattern': None},
+    {'name': 'broad_regex', 'args': ['-n'], 'pattern': r'\w+\('},
+    {'name': 'case_insensitive', 'args': ['-i', '-F'], 'pattern': 'error'},
+]
 
 SEMANTIC_QUERIES = [
     'parse Rust expressions',
@@ -294,6 +324,50 @@ class ActiveRss:
             }
 
 
+class SetupSampler(threading.Thread):
+    """Sample the daemon RSS while ``wg up`` builds an index."""
+
+    def __init__(self, service_dir, interval=0.05):
+        super().__init__(daemon=True)
+        self.service_dir = Path(service_dir)
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.peak_bytes = 0
+        self.samples = 0
+        self.pid = None
+
+    def _pid(self):
+        if self.pid:
+            return self.pid
+        try:
+            value = json.loads((self.service_dir / 'service.json').read_text(
+                encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        pid = value.get('pid')
+        if isinstance(pid, int):
+            self.pid = pid
+        return self.pid
+
+    def run(self):
+        while not self.stop_event.is_set():
+            pid = self._pid()
+            if pid:
+                value = read_rss_bytes(pid)
+                if value:
+                    self.peak_bytes = max(self.peak_bytes, value)
+                    self.samples += 1
+            time.sleep(self.interval)
+
+    def stop(self):
+        self.stop_event.set()
+        self.join(timeout=2)
+
+    @property
+    def peak_mib(self):
+        return mib(self.peak_bytes)
+
+
 class Bench:
     def __init__(self, args):
         self.args = args
@@ -309,6 +383,10 @@ class Bench:
         self.base_env.pop('RIPGREP_CONFIG_PATH', None)
         self.base_env.pop('WG_SERVICE_EVENTS', None)
         self.base_env.pop('WG_SERVICE_DIR', None)
+        self.base_env.pop('WGREP_INDEX_DIR', None)
+        self.base_env.pop('WGREP_INDEX_EVENTS', None)
+        self.base_env.pop('WGREP_NO_DAEMON', None)
+        self.base_env.pop('WGREP_NO_INDEX', None)
         self.base_env['SGREP_CACHE_MAX_BYTES'] = str(4 * 1024 * 1024 * 1024)
         for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
             self.base_env.pop(key, None)
@@ -319,10 +397,18 @@ class Bench:
         self.flags = {}
 
     # -- process helpers -------------------------------------------------
-    def env_for(self, service_dir=None):
+    def index_dir_for(self, service_dir):
+        service_dir = Path(service_dir)
+        return self.work / 'index' / service_dir.name
+
+    def env_for(self, service_dir=None, events=None):
         env = dict(self.base_env)
         if service_dir is not None:
+            service_dir = Path(service_dir)
             env['WG_SERVICE_DIR'] = str(service_dir)
+            env['WGREP_INDEX_DIR'] = str(self.index_dir_for(service_dir))
+        if events is not None:
+            env['WGREP_INDEX_EVENTS'] = str(events)
         return env
 
     def _log_command(self, record):
@@ -332,7 +418,7 @@ class Bench:
             with open(self.command_log, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
-    def run(self, argv, cwd=None, timeout=60, tag='cmd', service_dir=None):
+    def run(self, argv, cwd=None, timeout=60, tag='cmd', service_dir=None, events=None):
         argv = [str(x) for x in argv]
         start = time.perf_counter()
         timed_out = False
@@ -340,7 +426,7 @@ class Bench:
             proc = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd is not None else None,
-                env=self.env_for(service_dir),
+                env=self.env_for(service_dir, events),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -422,6 +508,7 @@ class Bench:
     def start_service(self, root, sid):
         service_dir = self.work / 'service' / sid
         service_dir.mkdir(parents=True, exist_ok=True)
+        self.index_dir_for(service_dir).mkdir(parents=True, exist_ok=True)
         if service_dir in self.started_services:
             raise BenchError(f'service already started: {service_dir}')
         self.started_services.append(service_dir)
@@ -446,14 +533,30 @@ class Bench:
                         service_dir=service_dir)
         time.sleep(0.1)
         gone = False
+        pid = None
         try:
-            self.status(service_dir)
+            status = self.status(service_dir)
+            pid = status.get('pid')
         except BenchError:
             gone = True
+        if not gone and pid:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    self.status(service_dir)
+                except BenchError:
+                    gone = True
+                    break
+                time.sleep(0.05)
         if service_dir in self.started_services:
             self.started_services.remove(service_dir)
         return {'sid': sid, 'down_exit': down['exit'],
-                'down_timed_out': down['timed_out'], 'daemon_gone': gone}
+                'down_timed_out': down['timed_out'], 'daemon_gone': gone,
+                'killed': bool(pid and not gone)}
 
     def stop_all(self):
         results = []
@@ -478,6 +581,76 @@ class Bench:
                             timeout=self.args.sgrep_build_timeout, tag='sgrep-prime')
         rows = parse_json_bytes(proc['stdout'], 'sgrep-prime')
         self.require(isinstance(rows, list) and rows, 'sgrep-prime returned no rows')
+
+    # -- phase: setup ----------------------------------------------------
+    def _sample_up(self, name, root, keep):
+        sid = f'setup-{name}'
+        service_dir = self.work / 'service' / sid
+        service_dir.mkdir(parents=True, exist_ok=True)
+        self.index_dir_for(service_dir).mkdir(parents=True, exist_ok=True)
+        self.started_services.append(service_dir)
+        sampler = SetupSampler(service_dir)
+        sampler.start()
+        record = {'corpus': name, 'root': str(root), 'keep': keep}
+        try:
+            started = time.perf_counter()
+            proc = self.checked(
+                [self.args.wg, 'up', str(root), '--model', MODEL, '--json'],
+                timeout=self.args.large_up_timeout, tag=f'setup-up-{name}',
+                allow=(0,), service_dir=service_dir)
+            record['up_ms'] = (time.perf_counter() - started) * 1000.0
+            record['up_exit'] = proc['exit']
+            try:
+                info = parse_json_bytes(proc['stdout'], f'setup-up-{name}')
+            except BenchError as exc:
+                info = {}
+                record['error'] = str(exc)
+            root_info = info.get('root') or {}
+            record['pid'] = info.get('pid')
+            record['files'] = root_info.get('files')
+            record['chunks'] = root_info.get('chunks')
+            record['build_ms'] = info.get('build_ms')
+            record['model_ms'] = info.get('model_ms')
+            record['total_ms'] = info.get('total_ms')
+            text = root_info.get('text') if isinstance(root_info, dict) else None
+            record['text_files'] = text.get('files') if isinstance(text, dict) else None
+            record['text_build_ms'] = text.get('build_ms') if isinstance(text, dict) else None
+            record['text_disk_bytes'] = text.get('disk_bytes') if isinstance(text, dict) else None
+            record['text_resident_bytes'] = (text.get('resident_bytes')
+                                              if isinstance(text, dict) else None)
+            record['text_error'] = root_info.get('text_error')
+            time.sleep(2.0)
+            if record.get('pid'):
+                record['ready_rss_mib'] = mib(tree_rss_bytes(record['pid']))
+            status = self.status(service_dir)
+            record['ready'] = bool(
+                (status.get('roots') or [{}])[0].get('ready'))
+        finally:
+            sampler.stop()
+            record['peak_rss_mib'] = sampler.peak_mib
+            record['rss_samples'] = sampler.samples
+            record['cleanup'] = self.stop_service(service_dir, sid)
+            if not keep:
+                shutil.rmtree(self.index_dir_for(service_dir), ignore_errors=True)
+                shutil.rmtree(service_dir, ignore_errors=True)
+        self.append_raw('setup', record)
+        self.flags.setdefault('setup_records', []).append(record)
+        print(f"setup {name}: up={record.get('up_ms', 0) / 1000.0:.1f}s "
+              f"peak={record.get('peak_rss_mib', 0):.0f} MiB "
+              f"ready={record.get('ready')} files={record.get('files')}", flush=True)
+        return record
+
+    def phase_setup(self):
+        self._sample_up('rust', self.corpus, keep=False)
+        linux = self.args.linux_corpus
+        if linux and not self.args.skip_linux_setup:
+            linux_path = Path(linux)
+            if linux_path.is_dir():
+                self._sample_up('linux', linux_path, keep=False)
+            else:
+                self.flags['setup_linux_skipped'] = f'missing: {linux}'
+        else:
+            self.flags['setup_linux_skipped'] = 'disabled'
 
     # -- phase: warm semantic -------------------------------------------
     def phase_warm(self):
@@ -803,53 +976,185 @@ class Bench:
         self.flags['multirepo_sgrep_levels'] = sgrep_levels
 
     # -- phase: text route ----------------------------------------------
+    def _rg_file_count(self, corpus, pattern, extra=()):
+        proc = self.run([self.args.rg, *extra, '-F', '-l', '--', pattern, '.'],
+                        cwd=corpus, timeout=120, tag='text-select-rg')
+        if proc['timed_out'] or proc['exit'] not in (0, 1):
+            return -1
+        return len(proc['stdout'].splitlines())
+
+    def choose_text_queries(self, corpus):
+        rare_counts = {w: self._rg_file_count(corpus, w) for w in TEXT_RARE_POOL}
+        present = [(n, w) for w, n in rare_counts.items() if 0 < n <= 60]
+        rare = min(present)[1] if present else TEXT_RARE_POOL[0]
+        common_counts = {w: self._rg_file_count(corpus, w) for w in TEXT_COMMON_POOL}
+        common = max(common_counts, key=lambda w: common_counts[w])
+        queries = []
+        for spec in TEXT_QUERY_SPECS:
+            item = dict(spec)
+            if item['name'] == 'rare_identifier':
+                item['pattern'] = rare
+            elif item['name'] == 'common_identifier':
+                item['pattern'] = common
+            item['argv'] = [*item['args'], '--', item['pattern'], '.']
+            queries.append(item)
+        self.flags['text_selection'] = {
+            'rare': rare, 'rare_counts': rare_counts,
+            'common': common, 'common_counts': common_counts,
+        }
+        return queries
+
+    def _text_parity(self, queries, service_dir):
+        parity = []
+        for query in queries:
+            args = [*query['args'], '--sort', 'path', '--color', 'never',
+                    '--', query['pattern'], '.']
+            events = self.raw / 'events' / f"parity-{query['name']}.ndjson"
+            events.parent.mkdir(parents=True, exist_ok=True)
+            events.unlink(missing_ok=True)
+            rg_res = self.run([self.args.rg, *args], cwd=self.corpus,
+                              timeout=180, tag=f"text-parity-rg-{query['name']}")
+            wg_res = self.run([self.args.wg, *args], cwd=self.corpus,
+                              timeout=180, tag=f"text-parity-wg-{query['name']}",
+                              service_dir=service_dir, events=events)
+            event = None
+            try:
+                lines = [json.loads(line) for line in
+                         events.read_text(encoding='utf-8').splitlines() if line.strip()]
+                event = next((e for e in lines if e.get('event') == 'search'), None)
+                event_count = sum(1 for e in lines if e.get('event') == 'search')
+            except (OSError, ValueError):
+                event_count = 0
+            ok_codes = (rg_res['exit'] in (0, 1) and wg_res['exit'] in (0, 1)
+                        and not rg_res['timed_out'] and not wg_res['timed_out'])
+            exact = (ok_codes and rg_res['exit'] == wg_res['exit']
+                     and rg_res['stdout'] == wg_res['stdout'])
+            row = {
+                'pattern': query['name'], 'text_pattern': query['pattern'],
+                'args': args, 'exact': exact,
+                'rg_exit': rg_res['exit'], 'wg_exit': wg_res['exit'],
+                'rg_bytes': len(rg_res['stdout']), 'wg_bytes': len(wg_res['stdout']),
+                'rg_lines': len(rg_res['stdout'].splitlines()),
+                'wg_lines': len(wg_res['stdout'].splitlines()),
+                'used': event.get('used') if event else None,
+                'reason': event.get('reason') if event else None,
+                'event_count': event_count,
+                'errors': [name for name, res in (('rg', rg_res), ('wg', wg_res))
+                           if res['timed_out'] or res['exit'] not in (0, 1)],
+            }
+            parity.append(row)
+            print(f"text parity {query['name']}: exact={exact} "
+                  f"used={row['used']} bytes={row['wg_bytes']}", flush=True)
+        (self.raw / 'text_parity.json').write_text(
+            json.dumps(parity, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+        self.flags['text_parity'] = parity
+
+    def _text_timed(self, tool, argv, service_dir, timeout):
+        started = time.perf_counter()
+        env = self.env_for(service_dir if tool == 'wg' else None)
+        try:
+            proc = subprocess.run(
+                [str(a) for a in argv], cwd=str(self.corpus), env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, timeout=timeout)
+            code, timed_out = proc.returncode, False
+        except subprocess.TimeoutExpired:
+            code, timed_out = None, True
+        return {'ms': (time.perf_counter() - started) * 1000.0,
+                'exit': code, 'timed_out': timed_out}
+
+    def _text_arm(self, tool, queries, clients, per_client, timeout):
+        records = []
+        lock = threading.Lock()
+
+        def agent(index):
+            for step in range(per_client):
+                query = queries[(index + step) % len(queries)]
+                res = self._text_timed(tool, [self.args.wg if tool == 'wg' else self.args.rg,
+                                              *query['argv']],
+                                       self._text_service, timeout)
+                with lock:
+                    records.append({'tool': tool, 'clients': clients,
+                                    'query': query['name'], 'ms': res['ms'],
+                                    'exit': res['exit'], 'timed_out': res['timed_out']})
+
+        started = time.perf_counter()
+        threads = [threading.Thread(target=agent, args=(i,)) for i in range(clients)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        makespan = time.perf_counter() - started
+        ok = [r for r in records if not r['timed_out'] and r['exit'] in (0, 1)]
+        dist = distribution([r['ms'] for r in ok])
+        return {
+            'clients': clients, 'tool': tool,
+            'requests': len(records), 'successes': len(ok),
+            'errors': len(records) - len(ok),
+            'throughput_qps': len(ok) / max(1e-9, makespan),
+            'p50_ms': dist['p50_ms'], 'p95_ms': dist['p95_ms'],
+        }, records
+
     def phase_text(self):
         service_dir, status = self.start_service(self.corpus, 'text')
-        patterns = [('absent', 'zzqx_absent_literal_9f3a2b'), ('common', 'parse')]
+        self._text_service = service_dir
+        pid = int(status['pid'])
         records = []
-        parity = []
+        concurrency = []
         try:
-            for name, pattern in patterns:
-                wg_argv = [self.args.wg, '-F', pattern, '.']
-                rg_argv = [self.args.rg, '-F', pattern, '.']
+            queries = self.choose_text_queries(self.corpus)
+            for query in queries:
                 for _ in range(self.args.warmup):
-                    self.run(wg_argv, cwd=self.corpus, timeout=60, tag='text-warmup-wg',
-                             service_dir=service_dir)
-                    self.run(rg_argv, cwd=self.corpus, timeout=60, tag='text-warmup-rg')
-                wg_check = self.run(wg_argv, cwd=self.corpus, timeout=60, tag='text-parity-wg',
-                                    service_dir=service_dir)
-                rg_check = self.run(rg_argv, cwd=self.corpus, timeout=60, tag='text-parity-rg')
-                wg_lines = sorted(wg_check['stdout'].splitlines())
-                rg_lines = sorted(rg_check['stdout'].splitlines())
-                parity.append({'pattern': name,
-                               'wg_exit': wg_check['exit'], 'rg_exit': rg_check['exit'],
-                               'wg_bytes': len(wg_check['stdout']), 'rg_bytes': len(rg_check['stdout']),
-                               'stdout_exact_identical': wg_check['stdout'] == rg_check['stdout'],
-                               'stdout_sorted_identical': wg_lines == rg_lines,
-                               'wg_lines': len(wg_lines), 'rg_lines': len(rg_lines)})
-                for sample in range(self.args.text_samples):
-                    for tool, argv, kwargs in (
-                        ('wg', wg_argv, {'service_dir': service_dir}),
-                        ('rg', rg_argv, {}),
-                    ):
-                        proc = self.run(argv, cwd=self.corpus, timeout=60,
-                                        tag=f'text-{tool}', **kwargs)
+                    self._text_timed('wg', [self.args.wg, *query['argv']],
+                                     service_dir, 180)
+                    self._text_timed('rg', [self.args.rg, *query['argv']],
+                                     None, 180)
+            self._text_parity(queries, service_dir)
+            for sample in range(self.args.text_samples):
+                for qi, query in enumerate(queries):
+                    order = (('rg', self.args.rg), ('wg', self.args.wg))
+                    if (sample + qi) % 2:
+                        order = tuple(reversed(order))
+                    for tool, exe in order:
+                        proc = self._text_timed(
+                            tool, [exe, *query['argv']],
+                            service_dir if tool == 'wg' else None, 180)
                         error = None
                         if proc['timed_out']:
                             error = 'timeout'
                         elif proc['exit'] not in (0, 1):
-                            error = f'exit {proc["exit"]}'
-                        record = {'sample': sample, 'pattern': name, 'tool': tool,
-                                  'ms': None if error else proc['elapsed_ms'], 'error': error,
-                                  'exit': proc['exit']}
+                            error = f"exit {proc['exit']}"
+                        record = {'sample': sample, 'pattern': query['name'],
+                                  'text_pattern': query['pattern'], 'tool': tool,
+                                  'ms': None if error else proc['ms'],
+                                  'error': error, 'exit': proc['exit']}
                         records.append(record)
                         self.append_raw('text_route', record)
+            time.sleep(1.0)
+            self.flags['text_daemon_rss_mib'] = mib(tree_rss_bytes(pid))
+
+            mix = [q for q in queries
+                   if q['name'] in ('absent_literal', 'rare_identifier',
+                                    'common_identifier', 'broad_regex')]
+            for clients in self.args.text_clients:
+                for tool in ('wg', 'rg'):
+                    row, raw = self._text_arm(tool, mix, clients,
+                                              self.args.text_per_client,
+                                              self.args.request_timeout)
+                    row['reps'] = 1
+                    concurrency.append(row)
+                    self.append_raw('text_concurrency', row)
+                    for item in raw:
+                        self.append_raw('text_concurrency_requests', item)
+                    print(f"text fanout {clients} {tool}: "
+                          f"{row['throughput_qps']:.1f} q/s "
+                          f"p50={row['p50_ms']:.0f} ms errors={row['errors']}",
+                          flush=True)
         finally:
             self.flags['text_cleanup'] = self.stop_service(service_dir, 'text')
-        (self.raw / 'text_parity.json').write_text(
-            json.dumps(parity, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
         self.flags['text_records'] = records
-        self.flags['text_parity'] = parity
+        self.flags['text_concurrency'] = concurrency
+        self.flags['text_pid'] = pid
 
     # -- phase: demo questions ------------------------------------------
     def phase_demo(self):
@@ -1043,10 +1348,14 @@ class Bench:
         flat['campaign_date_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         flat['campaign_corpus'] = str(self.args.corpus_source)
         flat['campaign_corpus_files'] = self.flags.get('corpus_files')
+        flat['campaign_wg_commit'] = self.args.commit or None
+        flat['campaign_source_archive_sha256'] = self.args.source_sha256 or None
+        flat['campaign_linux_corpus'] = str(self.args.linux_corpus or '') or None
         flat['campaign_wg_files'] = self.flags.get('wg_files')
         flat['campaign_wg_chunks'] = self.flags.get('wg_chunks')
         flat['campaign_single_campaign_note'] = (
-            'one campaign on a shared 4 vCPU VPS; no repeated sessions')
+            'one final campaign on a quiet shared 4 vCPU VPS; the setup phase '
+            'runs first, then warm, fan-out, multi-repo, text and freshness')
         flat['sgrep_cache_max_bytes'] = int(self.base_env['SGREP_CACHE_MAX_BYTES'])
         flat['wg_path'] = str(self.args.wg)
         flat['wg_sha256'] = sha256_file(self.args.wg)
@@ -1131,9 +1440,29 @@ class Bench:
                 flat[f'multirepo_{count}_sgrep_rss_process_peak_sum_mib'] = sg_levels[count]['sgrep_rss_process_peak_sum_mib']
                 flat[f'multirepo_{count}_sgrep_errors'] = sg_levels[count].get('sgrep_errors', 0)
 
-        # Text
+        # Setup
+        for row in self.flags.get('setup_records', []):
+            name = row['corpus']
+            prefix = f'setup_{name}'
+            flat[f'{prefix}_up_ms'] = row.get('up_ms')
+            flat[f'{prefix}_peak_rss_mib'] = row.get('peak_rss_mib')
+            flat[f'{prefix}_steady_rss_mib'] = row.get('ready_rss_mib')
+            flat[f'{prefix}_files'] = row.get('files')
+            flat[f'{prefix}_chunks'] = row.get('chunks')
+            flat[f'{prefix}_text_files'] = row.get('text_files')
+            flat[f'{prefix}_text_build_ms'] = row.get('text_build_ms')
+            flat[f'{prefix}_text_disk_bytes'] = row.get('text_disk_bytes')
+            flat[f'{prefix}_text_error'] = row.get('text_error')
+            flat[f'{prefix}_ready'] = row.get('ready')
+            flat[f'{prefix}_root'] = row.get('root')
+        skipped = self.flags.get('setup_linux_skipped')
+        if skipped:
+            flat['setup_linux_skipped'] = skipped
+
+        # Text route, one query at a time
         records = self.flags.get('text_records', [])
-        for name in ('absent', 'common'):
+        for spec in TEXT_QUERY_SPECS:
+            name = spec['name']
             for tool in ('wg', 'rg'):
                 ok = [r['ms'] for r in records
                       if r['pattern'] == name and r['tool'] == tool and r['ms'] is not None]
@@ -1150,35 +1479,57 @@ class Bench:
             flat[f'text_{name}_ratio_wg_over_rg_p50_x'] = (
                 wg_p50 / rg_p50 if wg_p50 and rg_p50 else None)
         for row in self.flags.get('text_parity', []):
-            flat[f"text_{row['pattern']}_stdout_exact_identical"] = bool(row['stdout_exact_identical'])
-            flat[f"text_{row['pattern']}_stdout_sorted_identical"] = bool(row['stdout_sorted_identical'])
-            flat[f"text_{row['pattern']}_wg_bytes"] = row['wg_bytes']
-            flat[f"text_{row['pattern']}_rg_bytes"] = row['rg_bytes']
-            flat[f"text_{row['pattern']}_wg_lines"] = row['wg_lines']
-            flat[f"text_{row['pattern']}_rg_lines"] = row['rg_lines']
+            name = row['pattern']
+            flat[f'text_{name}_text_pattern'] = row['text_pattern']
+            flat[f'text_{name}_stdout_exact_identical'] = bool(row['exact'])
+            flat[f'text_{name}_wg_bytes'] = row['wg_bytes']
+            flat[f'text_{name}_rg_bytes'] = row['rg_bytes']
+            flat[f'text_{name}_wg_lines'] = row['wg_lines']
+            flat[f'text_{name}_rg_lines'] = row['rg_lines']
+            flat[f'text_{name}_index_used'] = row.get('used')
+            flat[f'text_{name}_index_reason'] = row.get('reason')
+            flat[f'text_{name}_event_count'] = row.get('event_count')
+        flat['text_daemon_rss_mib'] = self.flags.get('text_daemon_rss_mib')
 
-        # Demo
+        # Text route, concurrent clients
+        for row in self.flags.get('text_concurrency', []):
+            prefix = f"text_fanout_{row['clients']}_{row['tool']}"
+            flat[f'{prefix}_throughput_qps'] = row['throughput_qps']
+            flat[f'{prefix}_p50_ms'] = row['p50_ms']
+            flat[f'{prefix}_p95_ms'] = row['p95_ms']
+            flat[f'{prefix}_requests'] = row['requests']
+            flat[f'{prefix}_successes'] = row['successes']
+            flat[f'{prefix}_errors'] = row['errors']
+
+        # Demo (optional phase; omitted when it did not run)
         demo = self.flags.get('demo_results', [])
-        flat['demo_questions_total'] = len(demo)
-        flat['demo_wg_top1_path_hits'] = sum(
-            1 for d in demo if d['wg_top1_path_contains_answer'])
-        flat['demo_wg_top5_path_hits'] = sum(
-            1 for d in demo if d['wg_top5_path_contains_answer'])
-        flat['demo_wg_top1_line_hits'] = sum(
-            1 for d in demo if d['wg_top1_line_contains_answer'])
-        flat['demo_wg_top5_line_hits'] = sum(
-            1 for d in demo if d['wg_top5_line_contains_answer'])
-        flat['demo_rg_answer_file_hits'] = sum(1 for d in demo if d['rg_answer_file_has_match'])
-        flat['demo_rg_total_matches'] = sum(d['rg_total_matches'] for d in demo)
-        for d in demo:
-            prefix = f"demo_{d['id']}"
-            flat[f'{prefix}_wg_top1_path_contains_answer'] = bool(d['wg_top1_path_contains_answer'])
-            flat[f'{prefix}_wg_top5_path_contains_answer'] = bool(d['wg_top5_path_contains_answer'])
-            flat[f'{prefix}_wg_top1_line_contains_answer'] = bool(d['wg_top1_line_contains_answer'])
-            flat[f'{prefix}_wg_top5_line_contains_answer'] = bool(d['wg_top5_line_contains_answer'])
-            flat[f'{prefix}_rg_total_matches'] = d['rg_total_matches']
-            flat[f'{prefix}_rg_files_with_matches'] = d['rg_files_with_matches']
-            flat[f'{prefix}_rg_answer_file_has_match'] = bool(d['rg_answer_file_has_match'])
+        if demo:
+            flat['demo_questions_total'] = len(demo)
+            flat['demo_wg_top1_path_hits'] = sum(
+                1 for d in demo if d['wg_top1_path_contains_answer'])
+            flat['demo_wg_top5_path_hits'] = sum(
+                1 for d in demo if d['wg_top5_path_contains_answer'])
+            flat['demo_wg_top1_line_hits'] = sum(
+                1 for d in demo if d['wg_top1_line_contains_answer'])
+            flat['demo_wg_top5_line_hits'] = sum(
+                1 for d in demo if d['wg_top5_line_contains_answer'])
+            flat['demo_rg_answer_file_hits'] = sum(
+                1 for d in demo if d['rg_answer_file_has_match'])
+            flat['demo_rg_total_matches'] = sum(d['rg_total_matches'] for d in demo)
+            for d in demo:
+                prefix = f"demo_{d['id']}"
+                flat[f'{prefix}_wg_top1_path_contains_answer'] = bool(
+                    d['wg_top1_path_contains_answer'])
+                flat[f'{prefix}_wg_top5_path_contains_answer'] = bool(
+                    d['wg_top5_path_contains_answer'])
+                flat[f'{prefix}_wg_top1_line_contains_answer'] = bool(
+                    d['wg_top1_line_contains_answer'])
+                flat[f'{prefix}_wg_top5_line_contains_answer'] = bool(
+                    d['wg_top5_line_contains_answer'])
+                flat[f'{prefix}_rg_total_matches'] = d['rg_total_matches']
+                flat[f'{prefix}_rg_files_with_matches'] = d['rg_files_with_matches']
+                flat[f'{prefix}_rg_answer_file_has_match'] = bool(
+                    d['rg_answer_file_has_match'])
 
         # Cleanup outcomes
         for key, value in self.flags.items():
@@ -1194,6 +1545,12 @@ def build_parser():
     ap.add_argument('--sgrep', default=DEFAULT_SGREP)
     ap.add_argument('--rg', default=DEFAULT_RG)
     ap.add_argument('--corpus-source', default=DEFAULT_CORPUS)
+    ap.add_argument('--linux-corpus', default=DEFAULT_LINUX,
+                    help='Linux kernel tree for the setup phase; empty to disable')
+    ap.add_argument('--skip-linux-setup', action='store_true')
+    ap.add_argument('--commit', default=None, help='wg source commit for the record')
+    ap.add_argument('--source-sha256', default=None,
+                    help='sha256 of the git archive that produced the binary')
     ap.add_argument('--hf-hub', default=DEFAULT_HF_HUB)
     ap.add_argument('--ts-pack', default=DEFAULT_TS_PACK)
     ap.add_argument('--work')
@@ -1202,7 +1559,8 @@ def build_parser():
     ap.add_argument('--semantic-samples', type=int, default=120,
                     help='total interleaved warm semantic samples per tool')
     ap.add_argument('--warmup', type=int, default=3)
-    ap.add_argument('--up-timeout', type=float, default=600)
+    ap.add_argument('--up-timeout', type=float, default=900)
+    ap.add_argument('--large-up-timeout', type=float, default=2400)
     ap.add_argument('--sgrep-build-timeout', type=float, default=300)
     ap.add_argument('--request-timeout', type=float, default=60)
     ap.add_argument('--fresh-wg-samples', type=int, default=30)
@@ -1213,6 +1571,8 @@ def build_parser():
     ap.add_argument('--fanout-seconds', type=float, default=10.0)
     ap.add_argument('--repo-counts', type=int, nargs='+', default=[1, 3, 5])
     ap.add_argument('--text-samples', type=int, default=30)
+    ap.add_argument('--text-clients', type=int, nargs='+', default=[1, 4, 16, 32])
+    ap.add_argument('--text-per-client', type=int, default=4)
     ap.add_argument('--phase', action='append', default=None,
                     choices=['setup', 'warm', 'fanout', 'multirepo', 'text', 'demo',
                              'freshness'],
@@ -1276,16 +1636,32 @@ def main(argv=None):
     work = Path(args.work).resolve()
     work.mkdir(parents=True, exist_ok=True)
     bench = Bench(args)
-    selected = args.phase or ['warm', 'fanout', 'multirepo', 'text', 'demo', 'freshness']
+    selected = args.phase or ['setup', 'warm', 'fanout', 'multirepo', 'text',
+                              'freshness']
     if 'setup' not in selected:
-        selected = ['setup'] + selected
+        selected = ['prepare'] + selected
     ran = []
     failed = []
     try:
         for phase in selected:
-            if phase == 'setup':
+            if phase == 'prepare':
                 bench.setup()
                 ran.append(phase)
+                continue
+            if phase == 'setup':
+                bench.setup()
+                print('phase: setup', flush=True)
+                try:
+                    bench.phase_setup()
+                    ran.append(phase)
+                except BenchError as exc:
+                    failed.append({'phase': phase, 'error': str(exc)})
+                    bench.flags[f'phase_{phase}_error'] = str(exc)
+                    print(f'phase {phase} FAILED: {exc}', file=sys.stderr, flush=True)
+                except Exception as exc:  # noqa: BLE001 - keep the campaign alive
+                    failed.append({'phase': phase, 'error': repr(exc)})
+                    bench.flags[f'phase_{phase}_error'] = repr(exc)
+                    print(f'phase {phase} CRASHED: {exc!r}', file=sys.stderr, flush=True)
                 continue
             print(f'phase: {phase}', flush=True)
             try:

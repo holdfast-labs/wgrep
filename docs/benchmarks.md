@@ -1,95 +1,124 @@
 # wg benchmarks
 
 All numbers here come from retained raw records on the authorized Debian 13
-VPS (4 vCPU, 7.8 GiB RAM). They are single measurement runs, not percentiles
-over many sessions or machines. Windows numbers are a separate corpus copy and
-are not an apples-to-apples ratio.
+VPS (4 vCPU, 7.8 GiB RAM, no swap). They are single measurement runs, not
+percentiles over many sessions or machines. Windows numbers are a separate
+corpus copy and are not an apples-to-apples ratio.
 
 Setup and search latency are different measurements. Do not infer one from the
 other.
 
-## Comparison with sgrep (2026-10-20)
+## Comparison with sgrep (2026-10-21)
 
-`wg`'s semantic route is derived from sgrep revision `0fbe8e5`. This campaign
-compares the two on the same 13,332-file Rust `src` corpus, model and
-machine. Full method, raw-record paths and caveats are in
+`wg` is now one binary: sgrep-identical semantic ranking plus the built-in
+ripgrep 15.1 text route and trigram index in one daemon. This campaign compares
+the final code on the same 13,332-file Rust `src` corpus, model and machine.
+Full method, raw-record paths and caveats are in
 [bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
 
 | Measure | wg | sgrep CLI | Result |
 | --- | ---: | ---: | --- |
-| One-file edit to first correct result, p50 | 0.22 s | 20.2 s | 91x faster. sgrep has no watcher and rebuilds its index. |
-| Warm semantic query, p50 | 147 ms | 495 ms | 3.4x faster. Top-10 rows and scores identical on 5/5 queries. |
-| 16 concurrent clients, throughput | 24.1 q/s | 6.2 q/s | 3.9x. 0 errors or timeouts on either side. |
-| Five attached repositories, RSS | 2.61 GiB | 1.19 GiB | wg uses about 2.2x the memory. |
-| Text search vs direct `rg 15.1`, p50 | 45.6 / 60.7 ms | 54.5 / 61.1 ms (rg) | No measurable overhead; same output lines. |
+| One-file edit to first correct result, p50 | 90.6 ms | 20,092 ms | 222x faster. sgrep has no watcher and rebuilds its index. |
+| Warm semantic query, p50 | 23.2 ms | 502.3 ms | 21.7x faster. Top-10 rows and scores identical on 5/5 queries. |
+| 16 concurrent clients, throughput | 149.0 q/s | 5.7 q/s | 26.2x. 0 errors or timeouts on either side. |
+| Five attached repositories, RSS | 1.45 GiB | 1.19 GiB | wg uses 1.21x the memory. Honest negative. |
+| Text search vs direct `rg 15.1`, p50 | 4.9 / 5.2 / 41.8 / 96.6 / 31.7 ms | 52.4 / 52.5 / 67.9 / 110.8 / 62.4 ms (rg) | Faster on all five cases; byte-identical output. |
 
-One campaign on one 4 vCPU VPS. sgrep runs one process per query; wg answers
-through its resident daemon.
+One final campaign on one 4 vCPU VPS. sgrep runs one process per query; wg
+answers through its resident daemon. The text route is an in-process ripgrep
+15.1 engine, not an external `rg` child.
 
-## Setup: Rust `src` corpus
+## Setup: Rust `src` and Linux trees
 
-| Measure | Earlier isolated run | Final copied-corpus run |
-| --- | ---: | ---: |
-| Files | 13,332 | 13,333 |
-| Semantic chunks | 63,786 | 63,787 |
-| Index build | 29,280 ms | 25,259 ms |
-| Model setup | 129 ms | 0 ms (already loaded) |
-| Total reported | 29,560 ms | 25,314 ms |
-| End-to-end wall | 29,563 ms | 25,314 ms |
+Each tree used a fresh service directory and text-index directory. Peak RSS was
+sampled at 50 ms. Steady RSS was sampled 2 s after ready.
 
-The final run used a scratch copy of the corpus, so its files were freshly in
-the page cache. The earlier run walked the isolated source tree directly.
-Model and parser assets were cached in both cases; `HF_HUB_OFFLINE=1` blocked
-downloads. A repeat `wg up` on an attached root took 5.9 ms wall and kept the
-same daemon PID. A second one-file repository attached to the same PID in
-54.5 ms wall, with one loaded model.
+| Corpus | Files | Semantic chunks | `wg up` | Text build | Peak RSS | Steady RSS | Text index |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Rust `prof/src` | 13,332 | 63,786 | 18.1 s | 1.48 s | 634.9 MiB | 359.4 MiB | 13,289 files, 20.4 MB |
+| Linux 7.2.9 | 94,318 | 1,088,574 | 592.3 s | 28.2 s | 3,905.7 MiB | 3,387.7 MiB | 94,316 files, 247.0 MB |
 
-## Warm search latency (final binary)
+The Linux tree now reaches ready on this 7.8 GiB machine; the earlier campaign
+was OOM-killed on the same tree. Model and parser assets were cached, and
+`HF_HUB_OFFLINE=1` blocked downloads. A repeat `wg up` on an attached root
+returns immediately and keeps the same daemon PID.
 
-120 samples per workload, interleaved over four queries/cells, warm daemon and
-OS cache, 13,333-file root.
+## Warm semantic latency
 
-| Workload | p50 | p95 | p99 | Errors |
-| --- | ---: | ---: | ---: | ---: |
-| Semantic (`parse Rust expressions`, `emit compiler error diagnostics`, `validate command line options`, `resolve module imports`) | 154.2 ms | 170.8 ms | 173.7 ms | 0 |
-| rg text/regex (`-F` absent, `-F` identifier, broad `fn`, `\bpub\s+fn\b`) | 143.4 ms | 196.0 ms | 209.1 ms | 0 |
+120 samples per tool over five queries: `parse Rust expressions`,
+`emit compiler error diagnostics`, `validate command line options`,
+`resolve module imports`, `incremental compilation query dependency tracking`.
+Warm daemon and OS cache, 13,332-file root, `--model code`, top 10.
 
-Each row is a declared mixture, not a per-query percentile. Process start,
-loopback IPC, and daemon-side work are included. The text route runs a real
-`rg` child; the semantic index does not accelerate regex scans.
+| Tool | p50 | p95 | Errors |
+| --- | ---: | ---: | ---: |
+| wg | 23.2 ms | 26.6 ms | 0 |
+| sgrep CLI | 502.3 ms | 529.8 ms | 0 |
 
-## Edit-to-first-correct-result latency (final binary)
+The row is a declared mixture, not a per-query percentile. Process start,
+loopback IPC, and daemon-side work are included. Top-10 rows and scores were
+identical on 5/5 queries.
 
-A 100-iteration alternating same-size edit of one probe file in a 13,333-file
-scratch copy, measured from a completed write to the first CLI response that
-returned the new symbol. The fresh pinned-sgrep comparison ran after each
-measurement, outside the interval.
+## Edit-to-first-correct-result latency
 
-| Samples | min | p50 | p95 | max | Misses |
+A probe file in a 13,332-file scratch copy was rewritten with a new symbol.
+The clock starts when the write returns and stops at the first CLI response
+that returns the new symbol. 30 samples; warmups excluded.
+
+| Samples | min | p50 | p95 | max | Errors |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 100 | 188.1 ms | 208.7 ms | 229.5 ms | 246.0 ms | 0 |
+| 30 | 84.0 ms | 90.6 ms | 92.9 ms | 96.2 ms | 0 |
 
-Final results also matched a freshly built pinned sgrep index exactly, with no
-score or ordering differences.
+The pinned sgrep comparison ran after each sample, outside the interval. It
+rebuilt its whole index in 6 of 6 samples and took 20.1 s at p50. Final results
+also matched a freshly built pinned sgrep index exactly, with no score or
+ordering differences.
 
-## Update-design trade-off
+## Text route vs direct rg 15.1
+
+Five cases on the Rust corpus. Literal cases use `-F`; the broad case uses `-n`
+to stay on the text route; case-insensitive uses `-i -F`. n = 30 per tool per
+case. All five cases used the daemon index and were byte-identical to rg under
+`--sort path`.
+
+| Case | Pattern | wg p50 | wg p95 | rg p50 | rg p95 | wg / rg p50 | Output bytes / lines |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Absent literal | `zzqxjwvbnm_wg_text_absent_zzz` | 4.9 ms | 5.8 ms | 52.4 ms | 65.4 ms | 0.09 | 0 / 0 |
+| Rare identifier | `genericargs` | 5.2 ms | 6.4 ms | 52.5 ms | 61.0 ms | 0.10 | 107 / 1 |
+| Common identifier | `let` | 41.8 ms | 53.6 ms | 67.9 ms | 86.3 ms | 0.62 | 16,197,218 / 136,359 |
+| Broad regex | `\w+\(` | 96.6 ms | 128.2 ms | 110.8 ms | 126.3 ms | 0.87 | 45,694,788 / 414,206 |
+| Case-insensitive | `-i -F error` | 31.7 ms | 37.5 ms | 62.4 ms | 75.8 ms | 0.51 | 5,321,683 / 34,567 |
+
+The absent and rare cases show the index prune. Common, broad and
+case-insensitive cases still scan much of the tree; the index removes only
+impossible candidates. The text route runs an in-process ripgrep 15.1 engine,
+so it does not pay an `rg` process start.
+
+## Text route: concurrent clients
+
+Fixed mix of four queries (absent, rare, common, broad). Each client ran four
+queries; one rep. Latency is per query, including process start and IPC.
+Throughput is completed queries divided by makespan.
+
+| Clients | wg q/s | wg p50 | wg p95 | wg n | rg q/s | rg p50 | rg p95 | rg n | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 27.8 | 22.7 ms | 86.4 ms | 4 | 14.6 | 57.1 ms | 104.7 ms | 4 | 0 |
+| 4 | 29.9 | 102.5 ms | 335.0 ms | 16 | 15.1 | 240.4 ms | 447.3 ms | 16 | 0 |
+| 16 | 29.9 | 293.5 ms | 1,423.9 ms | 64 | 16.0 | 811.4 ms | 1,738.3 ms | 64 | 0 |
+| 32 | 31.5 | 835.3 ms | 2,732.8 ms | 128 | 16.1 | 1,528.0 ms | 3,505.2 ms | 128 | 0 |
+
+`wg` saturates near 31 text queries/s on 4 vCPU, about 1.9-2.0x rg. All clients
+share one daemon and one index. The 1-client row has only 4 requests, so its
+p95 is weak.
+
+## Update-design trade-off (earlier preview)
 
 The first live implementation copied and re-encoded the whole snapshot on each
-update. The final implementation shares unchanged file, chunk, and vector
-records and copies only index metadata. Measured A/B on the same corpus, 40
-samples each:
-
-| Workload | Whole-snapshot copy | Shared snapshots |
-| --- | ---: | ---: |
-| Semantic p50 | 122.3 ms | 161.6 ms |
-| rg text p50 | 142.5 ms | 145.2 ms |
-| Edit visibility p50 (100 samples, whole-snapshot run) | 1,879.7 ms | 208.7 ms |
-
-The update path is about 9x faster. Warm semantic scoring is about 32% slower
-because unchanged chunks now sit behind individual reference-counted
-allocations, which costs cache locality. This is a known preview trade-off.
-A follow-up should store per-file chunks contiguously behind one shared
-allocation while keeping the same zero-copy update behavior.
+update. The current implementation shares unchanged file, chunk, and vector
+records and maps the base vectors. The measured edit visibility changed from
+1,879.7 ms p50 (whole-snapshot copy) to 90.6 ms p50 in this campaign. The
+earlier preview trade-off is superseded; this campaign measured only the final
+code.
 
 ## Windows
 
@@ -101,13 +130,15 @@ not been measured with this harness.
 
 ## Reproduce
 
-Protocol: `docs/release-protocol.md`. Harness:
-`bench/WGREP_WG_RELEASE.py`. Pinned controls are sgrep revision
-`0fbe8e5725f71667789be4a3abcea4e02f33afa4` and ripgrep 15.1.0.
+Protocol: `docs/release-protocol.md`. Harnesses:
+`bench/WG_LAUNCH_BENCH.py` and `bench/WGREP_WG_RELEASE.py`. Pinned controls are
+sgrep revision `0fbe8e5725f71667789be4a3abcea4e02f33afa4` and ripgrep 15.1.0.
+The launch campaign is documented in
+[bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
 
 Raw receipts (commands, stdout/stderr, argv, per-sample timings) are retained
 under `E:\wgrep-worktrees\wg-release-20261018\validation` and on the VPS under
-`/srv/logs/wispd/wg-release-*-20261018`.
+`/srv/logs/wispd/`.
 
 ## Media
 

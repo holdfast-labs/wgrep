@@ -1,63 +1,68 @@
-# wg launch benchmarks (2026-10-20)
+# wg launch benchmarks (2026-10-21, Phase D)
 
-Comparison-style measurements for launch tweets and chart cards. One campaign
-on the authorized shared Debian 13 VPS (4 vCPU, 7.8 GiB RAM). Raw per-sample
-records are retained on that VPS.
+This campaign measures the final single-binary `wg`: sgrep-identical semantic
+ranking plus the built-in ripgrep 15.1 text route and its trigram index in one
+daemon. One final campaign ran on a quiet Debian 13 VPS. Raw per-sample records
+are retained on that VPS.
+
+> **This document supersedes the 2026-10-20 campaign.** That run used a
+> multi-crate release build and an external `rg` child. Do not mix its numbers
+> with these.
 
 ## Scope and identities
 
 | Item | Value |
 | --- | --- |
-| Machine | `v2202610434069536057`, Debian 13, x86_64, 4 vCPU, 7.8 GiB |
+| Machine | `v2202610434069536057`, Debian 13, x86_64, 4 vCPU, 7.8 GiB, no swap |
 | Corpus | copy of `/srv/workspaces/wispd/prof/src` |
-| Corpus files (wg) | 13,332 files, 63,786 semantic chunks |
-| Corpus size | 186 MB, 13,448 total files in the copied tree |
-| wg | `/srv/projects/wispd/wg-release-20261018/crates/wgrep-sgrep-core/target/release/wg` |
-| wg SHA-256 | `b6bf371c7a3be0c7eef6cb5128cacf9f1372126018af7a94cf8759d1223b1fcc` |
+| Corpus files | 13,448 files, 148.7 MB |
+| Corpus (wg semantic) | 13,332 files, 63,786 chunks |
+| Corpus (wg text index) | 13,289 files, 20.4 MB on disk |
+| wg source commit | `ec861dc0666759b3de945deb58949aeb9fbb4aed` |
+| wg source archive SHA-256 | `c7ee47ba5fd6b177b64f45c8d5fd48b536226339369f307a577c6457ae2fefb1` |
+| wg binary SHA-256 | `412f694f802d8376c3768c1ee90620d18b772e0cd0f414db4baa3f995117e2a8` |
 | sgrep control | revision `0fbe8e5725f71667789be4a3abcea4e02f33afa4` |
 | sgrep SHA-256 | `715946fa0f17006905b5f0d0bbf1f21c00e355882855ec40c44c14e78a3c6217` |
-| rg | 15.1.0, `/srv/workspaces/wispd/tools/rg-15/rg` |
-| Model | `minishlab/potion-code-16M-v2`, revision `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`, `--model code` |
+| rg | 15.1.0 (rev `af60c2de9d`), `/srv/workspaces/wispd/tools/rg-15/rg` |
+| rg SHA-256 | `ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2` |
+| Model | `minishlab/potion-code-16M-v2`, `--model code` |
 | Cache mode | `HF_HUB_OFFLINE=1`, cached model and parser assets |
-| Daemon state | isolated `WG_SERVICE_DIR` per phase, all task-owned daemons stopped |
+| Isolation | one `WG_SERVICE_DIR` and one `WGREP_INDEX_DIR` per arm |
+
+Build: `git archive HEAD` into a fresh directory, then
+`cargo build --locked --release --bin wg -j2`. The machine load average was
+0.52 at start and no other measurement job ran.
 
 The sgrep index cache used a 4 GiB cap (`SGREP_CACHE_MAX_BYTES`) so that one
-index per repository stayed on disk. Without that cap sgrep evicts old indexes
-and the multi-repo measurement silently turns into repeated index builds.
+index per repository stayed on disk.
 
 ## Method
 
-- One campaign. Warmups are excluded from every distribution.
+- One final campaign (`campaign2`). Warmups are excluded from every
+  distribution. Run1 is kept only for audit; a harness argument bug aborted its
+  text phase, so no run1 number appears here.
 - Every subprocess has a timeout and a checked return code.
 - Latency includes process start, loopback IPC and daemon work. It is not
   daemon-internal scoring time.
 - RSS is `VmRSS` from `/proc/<pid>/status`. wg RSS includes daemon children.
-  sgrep RSS is the sum of live client processes; the multi-repo row sums one
-  process per repository.
+  sgrep RSS is the sum of live client processes.
 - Freshness starts when the file write returns and stops at the first query
-  response that contains the new symbol. wg polls every 10 ms. sgrep runs its
-  cached query; sgrep detected the change and rebuilt its index by itself in
-  6 of 6 samples.
-- Text cells run `wg -F PATTERN .` and `rg -F PATTERN .` in the corpus
-  directory, with `RIPGREP_CONFIG_PATH` unset. Outputs are compared as exact
-  bytes and as sorted lines. Two identical `rg` runs produced different byte
-  order, so exact-byte order is not a stable property of `rg`.
-- The eight demo questions were selected first, then each answer location was
-  verified by hand with `rg`, then wg and keyword `rg` were run. The reference
-  is the cited `file:line`, not a chunk chosen after the result.
+  response that contains the new symbol. wg polls every 10 ms. sgrep detected
+  the change and rebuilt its index by itself in 6 of 6 samples.
+- Text cells run `wg PATTERN .` and `rg PATTERN .` in the corpus directory with
+  `RIPGREP_CONFIG_PATH` unset. `wg` uses its built-in ripgrep 15.1.
+- Text parity uses `--sort path --color never` and compares exact bytes. A
+  `WGREP_INDEX_EVENTS` file records the path that each `wg` call used.
 
 ## M1. Freshness: one-file edit to first correct response
 
-A probe file was added to a copy of the 13,332-file tree. Each sample rewrote
-it with a new symbol, then polled until the response contained that symbol.
-
 | Tool | n | p50 | p95 | min | max | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| wg live daemon | 30 | 222.9 ms | 241.8 ms | 208.5 ms | 245.9 ms | 0 |
-| sgrep CLI, cached index | 6 | 20,249.3 ms | 20,826.3 ms | 19,785.0 ms | 20,854.4 ms | 0 |
-| Ratio | | **90.9x** | | | | |
+| wg live daemon | 30 | 90.6 ms | 92.9 ms | 84.0 ms | 96.2 ms | 0 |
+| sgrep CLI, cached index | 6 | 20,092.1 ms | 21,596.1 ms | 19,181.6 ms | 21,723.4 ms | 0 |
+| Ratio sgrep / wg | | **221.6x** | | | | |
 
-sgrep has no watcher. Its next query rebuilds the whole index (6 of 6 samples).
+sgrep has no watcher. Its next query rebuilt the whole index in 6 of 6 samples.
 The wg update is incremental. This is a product-level difference, not only an
 index-speed difference.
 
@@ -67,17 +72,17 @@ index-speed difference.
 `parse Rust expressions`, `emit compiler error diagnostics`,
 `validate command line options`, `resolve module imports`,
 `incremental compilation query dependency tracking`. Both tools used warm
-caches and `--model code`, `--top 10` for wg, `-n 10` for sgrep.
+caches and `--model code`, `--top 10` for wg and `-n 10` for sgrep.
 
 | Tool | n | p50 | p95 | min | max | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| wg | 120 | 146.6 ms | 168.6 ms | 123.3 ms | 175.2 ms | 0 |
-| sgrep CLI | 120 | 494.6 ms | 535.1 ms | 455.5 ms | 549.1 ms | 0 |
-| Ratio wg / sgrep | | **0.296** (wg 3.37x faster) | | | | |
+| wg | 120 | 23.2 ms | 26.6 ms | 21.3 ms | 29.7 ms | 0 |
+| sgrep CLI | 120 | 502.3 ms | 529.8 ms | 472.8 ms | 533.3 ms | 0 |
+| Ratio wg / sgrep | | **0.046** (wg 21.7x faster) | | | | |
 
-Top-k parity: 5 of 5 queries returned identical ordered rows and identical
+Top-10 parity: 5 of 5 queries returned identical ordered rows and identical
 scores (exact float equality, not a tolerance). See
-`raw/rank_parity.json`.
+`campaign2/raw/rank_parity.json`.
 
 ## M3. Agent fan-out
 
@@ -86,166 +91,166 @@ processes. sgrep runs one CLI process per client; wg clients share one daemon.
 
 | Clients | wg q/s | wg p50 | wg p95 | wg errors / timeouts | wg daemon RSS peak | sgrep q/s | sgrep p50 | sgrep p95 | sgrep errors / timeouts | sgrep peak concurrent RSS (sum) |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 6.79 | 149.3 ms | 164.9 ms | 0 / 0 | 803.4 MiB | 2.02 | 494.6 ms | 519.9 ms | 0 / 0 | 269.2 MiB |
-| 4 | 25.28 | 156.5 ms | 181.5 ms | 0 / 0 | 803.4 MiB | 6.21 | 635.1 ms | 691.5 ms | 0 / 0 | 998.8 MiB |
-| 16 | 24.11 | 659.2 ms | 717.0 ms | 0 / 0 | 803.4 MiB | 6.22 | 2,464.7 ms | 3,006.7 ms | 0 / 0 | 2,147.0 MiB |
+| 1 | 43.04 | 22.8 ms | 25.0 ms | 0 / 0 | 425.7 MiB | 1.94 | 510.7 ms | 542.7 ms | 0 / 0 | 269.0 MiB |
+| 4 | 151.50 | 25.3 ms | 32.0 ms | 0 / 0 | 427.9 MiB | 5.68 | 677.3 ms | 789.4 ms | 0 / 0 | 996.4 MiB |
+| 16 | 148.97 | 105.3 ms | 122.0 ms | 0 / 0 | 431.5 MiB | 5.68 | 2,622.9 ms | 3,683.2 ms | 0 / 0 | 2,282.8 MiB |
 
-wg throughput saturates at about 24 queries/s on 4 vCPU. At 16 clients wg has
-3.88x the throughput and less than one third of the p50 latency. The wg daemon
-keeps the same RSS at every client count. The sgrep column is the observed peak
-of the sum of live processes. If all 16 processes peaked at once at the
-single-process warm peak (269 MiB), the upper bound would be about 4.3 GiB; the
-observed peak of the live sum was 2.1 GiB.
+wg saturates near 149 queries/s on 4 vCPU. At 16 clients wg has 26.2x the
+throughput and 24.9x lower p50 latency, with zero errors. The wg daemon keeps
+about 0.42 GiB RSS at every client count. The sgrep column is the observed peak
+of the sum of live processes.
 
 ## M4. Multi-repo memory
 
 Copies of the same corpus were attached to one wg daemon, or served by one
 sgrep process each. sgrep indexes were warm and retained (4 GiB cap).
 
-| Repos | wg RSS idle | wg RSS peak during queries | sgrep sum peak | sgrep per-process peak sum | sgrep errors |
+| Repos | wg RSS idle | wg RSS query peak | sgrep sum peak | sgrep per-process peak sum | errors |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 803.9 MiB | 803.9 MiB | 238.4 MiB | 238.4 MiB | 0 |
-| 3 | 1,719.4 MiB | 1,719.4 MiB | 714.2 MiB | 723.0 MiB | 0 |
-| 5 | 2,609.3 MiB | 2,609.3 MiB | 1,188.8 MiB | 1,287.1 MiB | 0 |
+| 1 | 395.7 MiB | 395.7 MiB | 237.9 MiB | 237.9 MiB | 0 |
+| 3 | 923.8 MiB | 923.8 MiB | 547.3 MiB | 807.0 MiB | 0 |
+| 5 | 1,447.5 MiB | 1,447.5 MiB | 1,192.0 MiB | 1,269.0 MiB | 0 |
 
-This result does **not** favor wg. One daemon loads one model, but its
-per-repository index RSS is larger than a warm sgrep process. At five repos wg
-uses about 2.2x the RSS. Do not claim a multi-repo memory win from this run.
-sgrep processes are transient and map their index; wg holds a live index and
-watcher state in anonymous memory.
+This result still does not favor wg, but the gap is smaller than in the
+2026-10-20 run. At five roots wg uses 1.21x the sgrep sum peak and 1.14x the
+per-process peak sum. Do not claim a multi-repo memory win.
 
-## M5. Text-route overhead
+## T1. Text route: one query at a time
 
-| Pattern | wg n | wg p50 | wg p95 | rg p50 | rg p95 | wg / rg p50 | Output |
+Five cases on the Rust corpus. Literal cases use `-F`; the broad case uses `-n`
+to stay on the text route; case-insensitive uses `-i -F`. n = 30 per tool per
+case. All five cases used the daemon index (`used="daemon"`), had one search
+event each, and were byte-identical to rg under `--sort path`.
+
+| Case | Pattern | wg p50 | wg p95 | rg p50 | rg p95 | wg / rg p50 | Output bytes / lines | Index |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Absent literal | `zzqxjwvbnm_wg_text_absent_zzz` | 4.9 ms | 5.8 ms | 52.4 ms | 65.4 ms | 0.09 | 0 / 0 | daemon |
+| Rare identifier | `genericargs` | 5.2 ms | 6.4 ms | 52.5 ms | 61.0 ms | 0.10 | 107 / 1 | daemon |
+| Common identifier | `let` | 41.8 ms | 53.6 ms | 67.9 ms | 86.3 ms | 0.62 | 16,197,218 / 136,359 | daemon |
+| Broad regex | `\w+\(` | 96.6 ms | 128.2 ms | 110.8 ms | 126.3 ms | 0.87 | 45,694,788 / 414,206 | daemon |
+| Case-insensitive | `-i -F error` | 31.7 ms | 37.5 ms | 62.4 ms | 75.8 ms | 0.51 | 5,321,683 / 34,567 | daemon |
+
+The absent and rare cases show the index prune. Common, broad and
+case-insensitive cases still scan much of the tree; the index removes only
+impossible candidates. The text route runs an in-process ripgrep 15.1 engine,
+so this is not a separate `rg` child.
+
+## T2. Text route: concurrent clients
+
+Fixed mix of four queries (absent, rare, common, broad). Each client ran four
+queries; one rep. Latency is per query, including process start and IPC.
+Throughput is completed queries divided by makespan. n is the number of
+requests in the arm.
+
+| Clients | wg q/s | wg p50 | wg p95 | wg n | wg errors | rg q/s | rg p50 | rg p95 | rg n | rg errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 27.8 | 22.7 ms | 86.4 ms | 4 | 0 | 14.6 | 57.1 ms | 104.7 ms | 4 | 0 |
+| 4 | 29.9 | 102.5 ms | 335.0 ms | 16 | 0 | 15.1 | 240.4 ms | 447.3 ms | 16 | 0 |
+| 16 | 29.9 | 293.5 ms | 1,423.9 ms | 64 | 0 | 16.0 | 811.4 ms | 1,738.3 ms | 64 | 0 |
+| 32 | 31.5 | 835.3 ms | 2,732.8 ms | 128 | 0 | 16.1 | 1,528.0 ms | 3,505.2 ms | 128 | 0 |
+
+wg saturates near 31 text queries/s on 4 vCPU, about 1.9-2.0x rg. All clients
+share one daemon and one index. The 1-client row has only 4 requests, so its
+p95 is weak; treat it as a throughput point.
+
+## S1. Setup: `wg up`
+
+Each tree used a fresh service directory and index directory. Peak RSS was
+sampled at 50 ms. Steady RSS was sampled 2 s after the ready reply. The method
+matches `bench/WG_TEXT_LARGE_UP.py`, folded into the launch harness.
+
+| Corpus | Files | Semantic chunks | `wg up` | Text build | Peak RSS | Steady RSS | Text index |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| absent literal | 30 | 45.6 ms | 58.1 ms | 54.5 ms | 62.2 ms | 0.84 | identical (0 bytes) |
-| common identifier `parse` | 30 | 60.7 ms | 68.1 ms | 61.1 ms | 68.8 ms | 0.99 | same 5,835 lines / 1,789,315 B; exact order differs; sorted lines identical |
+| Rust `prof/src` | 13,332 | 63,786 | 18.1 s | 1.48 s | 634.9 MiB | 359.4 MiB | 13,289 files, 20.4 MB |
+| Linux 7.2.9 | 94,318 | 1,088,574 | 592.3 s (9m 52s) | 28.2 s | 3,905.7 MiB | 3,387.7 MiB | 94,316 files, 247.0 MB |
 
-The text route is not slower than direct `rg` in this run. `wg` runs a real
-`rg` child, so this is consistency, not acceleration. The exact-byte mismatch
-is traversal order: two direct `rg` runs also differ in order.
-
-## M6. Natural-language questions: wg vs keyword `rg`
-
-`top1` and `top5` below mean the answer **file** appears in the top-1 or top-5
-wg rows. `line` means the cited line is inside a returned chunk.
-
-| ID | Question | Verified answer | wg top-1 path | wg top-5 path | wg top-5 line | rg matches | rg files | rg has answer file |
-| --- | --- | --- | :---: | :---: | :---: | ---: | ---: | :---: |
-| q1 | How does the parser handle unary expressions in Rust code? | `tools/rust-analyzer/crates/parser/src/grammar/expressions.rs:412` | yes | yes | yes | 77,105 | 6,315 | yes |
-| q2 | Where does rustfmt decide to lay out a method chain vertically? | `tools/rustfmt/src/chains.rs:709` | yes | yes | no | 58,486 | 5,472 | yes |
-| q3 | How does clippy find unnecessary clone calls on Copy types? | `tools/clippy/clippy_lints/src/methods/clone_on_copy.rs:61` | no | no | no | 64,241 | 6,667 | yes |
-| q4 | How does miri implement the Stacked Borrows aliasing model? | `tools/miri/src/borrow_tracker/stacked_borrows/mod.rs:467` | no | yes | no | 16,050 | 3,019 | yes |
-| q5 | Where does rustdoc build the search index for documentation pages? | `librustdoc/html/render/search_index.rs:1267` | no | no | no | 44,707 | 2,864 | yes |
-| q6 | How does bootstrap download a prebuilt LLVM from CI? | `bootstrap/src/core/download.rs:356` | no | yes | yes | 11,064 | 768 | yes |
-| q7 | Where does compiletest compare the compiler output against expected files? | `tools/compiletest/src/runtest.rs:2488` | yes | yes | no | 28,457 | 2,667 | yes |
-| q8 | How does rust-analyzer resolve a module import during name resolution? | `tools/rust-analyzer/crates/hir-def/src/nameres/path_resolution.rs:154` | yes | yes | no | 92,184 | 4,416 | yes |
-
-Totals:
-
-| Metric | Result |
-| --- | ---: |
-| wg top-1 path hits | 4 / 8 |
-| wg top-5 path hits | 6 / 8 |
-| wg top-5 exact-line hits | 2 / 8 |
-| rg searches that include the answer file | 8 / 8 |
-| rg total matches over 8 questions | 392,294 |
-| rg match range per question | 11,064 to 92,184 |
-
-The keyword search includes the answer file every time, but the answer is one
-file among hundreds to thousands. wg returns the file in the top five for 6 of
-8. It misses q3 (the lint source) and q5 (the code that builds the search
-index). Those misses are real; do not show them as wins.
-
-Exact commands:
-
-```sh
-wg "<question>" <corpus> --model code --json --explain --top 10
-rg -i -F -e <word1> -e <word2> ... --count-matches .
-```
-
-Keywords are the question words after removing stopwords and words shorter than
-three characters. The patterns are ORed with one `-e` per word. Exact argv, wg
-JSON and rg output are retained per question.
+The Linux tree now reaches ready on this 7.8 GiB machine. The earlier campaign
+was OOM-killed on the same tree. Steady RSS is below 4 GiB after ready.
+A warm semantic query touches mapped vector pages, so later RSS can be higher
+until the kernel reclaims them.
 
 ## Tweetable headlines
 
-Each headline cites its table and its caveat. Use the caveat, not only the
+Each headline cites its table row and its caveat. Use the caveat, not only the
 number.
 
-1. **"Edit to answer: wg 0.22 s vs sgrep 20.2 s (91x)."** [M1] Caveat: sgrep is
-   a CLI with no watcher and rebuilds the whole index; one 4-vCPU VPS; wg n=30,
-   sgrep n=6.
-2. **"Warm semantic query: wg 147 ms vs sgrep 495 ms p50 (3.4x)."** [M2]
+1. **"Edit to answer: wg 91 ms vs sgrep 20.1 s p50 (222x)."** [M1] Caveat:
+   sgrep is a CLI with no watcher and rebuilds the whole index; one 4-vCPU VPS;
+   wg n=30, sgrep n=6.
+2. **"Warm semantic query: wg 23 ms vs sgrep 502 ms p50 (21.7x)."** [M2]
    Caveat: same corpus and model, five-query mixture, one machine; sgrep pays
    process start and model/index load each call.
 3. **"Warm top-10 results are identical: 5/5 queries, exact scores."** [M2]
    Caveat: this proves ranking parity on this corpus, not large-corpus quality.
-4. **"16 agents: wg 24.1 queries/s vs 6.2 (3.9x); p50 0.66 s vs 2.46 s; zero
+4. **"16 agents: wg 149 queries/s vs 5.7 (26.2x); p50 105 ms vs 2.62 s; zero
    errors."** [M3] Caveat: 10 s windows on 4 shared vCPU; wg saturates near
-   24 queries/s.
-5. **"One daemon serves 16 agents at a constant 0.80 GiB RSS."** [M3] Caveat:
-   the clients and the corpus are on the same machine; this is resident RSS,
-   not peak virtual memory.
-6. **"Text route is not slower: 46 ms vs 54 ms absent, 61 ms vs 61 ms common;
-   same lines."** [M5] Caveat: wg runs a real rg child; exact line order differs
-   because rg traversal order is not stable.
-7. **"Natural-language demo: right file in top-5 for 6/8 hand-checked
-   questions, while keyword rg returns 11k-92k matches."** [M6] Caveat: exact
-   line in top-5 only 2/8; wg misses q3 and q5; rg included the answer file for
-   8/8 among thousands of matches.
+   149 queries/s.
+5. **"One daemon serves 16 agents at 0.43 GiB RSS."** [M3] Caveat: the clients
+   and the corpus are on the same machine; this is resident RSS, not virtual
+   memory.
+6. **"Text search with the index: absent 4.9 ms vs 52.4 ms (10.7x); rare
+   5.2 ms vs 52.5 ms (10.1x); common 41.8 ms vs 67.9 ms; broad 96.6 ms vs
+   110.8 ms; case-insensitive 31.7 ms vs 62.4 ms."** [T1] Caveat: wg runs an
+   in-process rg 15.1 engine; direct rg pays process start; all five measured
+   cases were byte-identical; the index only prunes impossible candidates.
+7. **"32 text clients: wg 31.5 queries/s vs rg 16.1 (2.0x), zero errors."**
+   [T2] Caveat: fixed four-query mixture, one rep, 4 vCPU; wg saturates near
+   31 queries/s.
 8. **Do not tweet a multi-repo memory win.** [M4] Five roots on one wg daemon
-   use 2.6 GiB RSS; five warm sgrep processes use 1.2 GiB. One shared model is
-   true, but per-root index RSS dominates on this corpus.
+   use 1.45 GiB RSS; five warm sgrep processes use 1.19 GiB (1.21x more for
+   wg). One shared model is true, but per-root index RSS still dominates.
+9. **"The 1.62 GB Linux tree now attaches: `wg up` 9m 52s, 3.91 GiB peak,
+   3.39 GiB steady."** [S1] Caveat: one 4-vCPU VPS with no swap; the earlier
+   build was OOM-killed; the time is CPU bound.
 
 ## Limits
 
 - One final campaign, one shared VPS. Load and page cache can move the numbers.
-  A first full run is retained as run1 but is not used: its sgrep cache used the
-  default size, so per-repo indexes were evicted and the multi-repo sgrep arm
-  rebuilt indexes. The final run set a 4 GiB cap. Only the final run's numbers
-  appear here and in the results JSON.
+  Run1 is retained only for audit and is not used.
 - sgrep is a CLI, not a server. Every sgrep call includes process start and
   asset/index load. This is the real end-to-end CLI cost, but it is not an
   architecture-to-architecture comparison.
 - The freshness comparison is the most product-shaped result and the least
   symmetric: sgrep rebuilds its index after a change; wg updates incrementally.
 - Warm semantic p50/p95 are declared mixtures over five queries, not per-query
-  percentiles. Per-query samples are in `raw/warm_semantic.jsonl`.
+  percentiles.
 - Freshness p95 for sgrep rests on 6 samples. The wg row has 30 samples.
-- RSS is resident memory sampled at 50-100 ms. sgrep maps its index; wg holds
-  its index and watcher state in anonymous memory. These are not identical
-  accounting models.
+- RSS is resident memory. sgrep maps its index; wg holds its index and watcher
+  state in anonymous memory and maps the base vectors. These are not identical
+  accounting models. Mapped vector pages count in RSS after a query touches
+  them, but they are reclaimable.
 - The multi-repo sgrep number is the sum of one transient process per repo, not
-  a resident server. The multi-repo result is unfavorable to wg.
-- The corpus is 7,773 `.rs` files inside a 13,332-file rg-visible tree. The
-  semantic index has 63,786 chunks. Other corpora and the `auto` model can rank
-  differently.
-- The text route uses an authoritative `rg` child. Do not attach the lexical
-  `wgrep` trigram speedups to wg.
-- No commit was made. The wg binary is the release-tree build at the SHA above.
+  a resident server. The multi-repo result remains unfavorable to wg.
+- Text parity is exact for the five measured cases with `--sort path`. Unsorted
+  ripgrep traversal order is not stable, so do not require byte order without
+  `--sort path`.
+- The 1-client text concurrency row has 4 requests. Its p95 is not a stable
+  percentile.
+- The corpus is 7,773 `.rs` files inside a 13,332-file rg-visible tree. Other
+  corpora and the `auto` model can rank differently.
+- No commit was made.
 
 ## Receipts
 
 VPS (final campaign, `campaign2`):
 
-- Work and copies: `/srv/projects/wispd/wg-launch-bench-20261020/campaign2/`
-- Log: `/srv/logs/wispd/wg-launch-bench-20261020/campaign2.log`
-- Flat results: `/srv/projects/wispd/wg-launch-bench-20261020/WG_LAUNCH_BENCH_RESULTS.json`
-- Raw per-sample records: `campaign2/raw/*.jsonl`
+- Work and copies: `/srv/projects/wispd/wg-d-20261021/campaign2/`
+- Log: `/srv/logs/wispd/wg-d-20261021/campaign2.log`
+- Build log: `/srv/logs/wispd/wg-d-20261021/build.log`
+- Flat results: `/srv/projects/wispd/wg-d-20261021/campaign2/results.json`
+- Raw per-sample records: `campaign2/raw/`
   - `warm_semantic.jsonl` (240 records)
   - `freshness.jsonl` (36 records)
-  - `fanout.jsonl` and `fanout_requests.jsonl` (736 request records)
+  - `fanout.jsonl` and `fanout_requests.jsonl`
   - `multirepo.jsonl` (6 records)
-  - `text_route.jsonl` (120 records)
-  - `demo.jsonl` (8 records)
-  - `commands.jsonl` (1,287 commands with argv, exit, timeout, elapsed)
+  - `text_route.jsonl` (300 records)
+  - `text_concurrency.jsonl` and `text_concurrency_requests.jsonl`
+  - `setup.jsonl` (2 records)
+  - `commands.jsonl` (every subprocess with argv, exit, timeout, elapsed)
 - Rank parity: `campaign2/raw/rank_parity.json`
-- Text parity: `campaign2/raw/text_parity.json`
-- Demo outputs: `campaign2/raw/demo/q1-wg.json` ... `q8-wg.json`,
-  `q1-rg.txt` ... `q8-rg.txt`, and `q1-rg.argv.json` ... `q8-rg.argv.json`
-- Superseded first run: `WG_LAUNCH_BENCH_RESULTS.run1.json` and `campaign/`.
-  It is kept only for audit; the numbers in this document come from run 2.
+- Text parity and index mode: `campaign2/raw/text_parity.json`,
+  `campaign2/raw/events/`
+- Superseded run1: `/srv/projects/wispd/wg-d-20261021/campaign/` (audit only)
 
 Local repository:
 
@@ -257,13 +262,21 @@ Local repository:
 
 ```sh
 ssh vps
-cd /srv/projects/wispd/wg-launch-bench-20261020
-python3 WG_LAUNCH_BENCH.py --self-test
-python3 WG_LAUNCH_BENCH.py \
-  --work /srv/projects/wispd/wg-launch-bench-20261020/campaign3 \
-  --out /srv/projects/wispd/wg-launch-bench-20261020/WG_LAUNCH_BENCH_RESULTS.run3.json
+cd /srv/projects/wispd/wg-d-20261021
+source ~/.cargo/env
+cargo build --locked --release --bin wg -j2
+python3 bench/WG_LAUNCH_BENCH.py --self-test
+python3 bench/WG_LAUNCH_BENCH.py \
+  --wg /srv/projects/wispd/wg-d-20261021/target/release/wg \
+  --sgrep /srv/projects/wispd/sgrep-control-0fbe8e5/target/release/sgrep \
+  --rg /srv/workspaces/wispd/tools/rg-15/rg \
+  --commit ec861dc0666759b3de945deb58949aeb9fbb4aed \
+  --source-sha256 c7ee47ba5fd6b177b64f45c8d5fd48b536226339369f307a577c6457ae2fefb1 \
+  --work /srv/projects/wispd/wg-d-20261021/campaign3 \
+  --out /srv/projects/wispd/wg-d-20261021/campaign3/results.json
 ```
 
 The harness copies the corpus, prepares the cached sgrep assets, sets
-`HF_HUB_OFFLINE=1` and `SGREP_CACHE_MAX_BYTES`, isolates every `WG_SERVICE_DIR`,
-and stops only the daemons it started.
+`HF_HUB_OFFLINE=1` and `SGREP_CACHE_MAX_BYTES`, isolates every `WG_SERVICE_DIR`
+and `WGREP_INDEX_DIR`, and stops only the daemons it started. Use
+`--skip-linux-setup` to omit the kernel tree.
