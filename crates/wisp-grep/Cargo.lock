@@ -1598,6 +1598,7 @@ dependencies = [
  "half",
  "ignore",
  "lexopt",
+ "libc",
  "log",
  "memmap2",
  "notify",

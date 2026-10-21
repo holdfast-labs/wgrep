@@ -66,6 +66,10 @@ semantic = ["half", "safetensors", "tokenizers", "ureq", "sha2", "tree-sitter", 
 [dev-dependencies]
 tempfile = "3"
 
+# Used by `detached.rs` to close inherited descriptors on Unix.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.177"
+
 # The musl (static) release build uses jemalloc, matching ripgrep's release
 # build; the `#[global_allocator]` in `main.rs` is gated on the same cfg.
 [target.'cfg(all(target_env = "musl", target_pointer_width = "64"))'.dependencies]

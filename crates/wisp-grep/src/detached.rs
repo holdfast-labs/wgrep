@@ -5,7 +5,9 @@
 //! `wg up | tee`) then wait for EOF forever. On Windows, `CreateProcessW`
 //! with `bInheritHandles = TRUE` copies *every* inheritable handle, not only
 //! the standard handles. This module passes an explicit handle list, so the
-//! child inherits exactly its stdin (NUL) and its log file.
+//! child inherits exactly its stdin (NUL) and its log file. On Unix, a
+//! `pre_exec` hook closes every descriptor >= 3, so the child also starts with
+//! only NUL (stdin) and the log (stdout and stderr).
 
 use std::ffi::OsString;
 use std::io;
@@ -51,7 +53,10 @@ impl DetachedChild {
         }
         #[cfg(unix)]
         {
-            Ok(self.child.try_wait()?.map(|status| status.code().unwrap_or(-1)))
+            Ok(self
+                .child
+                .try_wait()?
+                .map(|status| status.code().unwrap_or(-1)))
         }
     }
 }
@@ -96,7 +101,10 @@ mod unix {
     use super::DetachedChild;
 
     pub(super) fn spawn(exe: &Path, args: &[OsString], log: &Path) -> io::Result<DetachedChild> {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)?;
         let mut command = Command::new(exe);
         command
             .args(args)
@@ -104,17 +112,84 @@ mod unix {
             .stdout(file.try_clone()?)
             .stderr(file);
         // Rust sets close-on-exec on the descriptors it opens, and the three
-        // standard descriptors now point at NUL or the log, so the daemon
-        // cannot keep a caller pipe open. A new process group lets the daemon
-        // outlive a terminal session.
+        // standard descriptors now point at NUL or the log. A descriptor >= 3
+        // that the caller made inheritable would still reach the daemon, so
+        // the child marks all of them close-on-exec before `exec`. Marking
+        // instead of closing keeps the standard library's own close-on-exec
+        // error pipe working, so a failed `exec` is still reported by
+        // `spawn`. A new process group lets the daemon outlive a terminal
+        // session.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            // SAFETY: the hook only calls syscalls; it does not allocate or
+            // take a lock, so it is safe between `fork` and `exec`.
+            unsafe {
+                command.pre_exec(cloexec_extra_fds);
+            }
             command.process_group(0);
         }
         let child = command.spawn()?;
         let pid = child.id();
         Ok(DetachedChild { pid, child })
+    }
+
+    /// Mark every descriptor >= 3 close-on-exec in the forked child. Must be
+    /// async-signal-safe: syscalls only, no allocation and no locks.
+    #[cfg(target_os = "linux")]
+    fn cloexec_extra_fds() -> io::Result<()> {
+        const CLOSE_RANGE_CLOEXEC: libc::c_int = 1 << 2;
+        // SAFETY: `close_range` takes three scalar arguments and touches no
+        // process memory. Kernels before 5.11 return ENOSYS or EINVAL; a libc
+        // without the wrapper is why this uses `syscall` directly.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked == 0 {
+            return Ok(());
+        }
+        cloexec_by_limit()
+    }
+
+    /// Fallback for Linux kernels without `CLOSE_RANGE_CLOEXEC` and for other
+    /// Unix.
+    #[cfg(not(target_os = "linux"))]
+    fn cloexec_extra_fds() -> io::Result<()> {
+        cloexec_by_limit()
+    }
+
+    fn cloexec_by_limit() -> io::Result<()> {
+        // SAFETY: `getrlimit` writes one `rlimit` struct owned by this frame.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let max = if limit.rlim_cur == libc::RLIM_INFINITY {
+            // No finite bound. Real Unix systems use a finite limit; this cap
+            // is larger than any practical table.
+            1_048_576
+        } else if limit.rlim_cur > libc::c_int::MAX as libc::rlim_t {
+            libc::c_int::MAX
+        } else {
+            limit.rlim_cur as libc::c_int
+        };
+        let mut fd: libc::c_int = 3;
+        while fd < max {
+            // SAFETY: `fcntl` on an unopened descriptor only returns EBADF.
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            fd += 1;
+        }
+        Ok(())
     }
 }
 
@@ -251,8 +326,14 @@ mod windows {
     }
 
     pub(super) fn spawn(exe: &Path, args: &[OsString], log: &Path) -> io::Result<DetachedChild> {
-        let nul = std::fs::OpenOptions::new().read(true).write(true).open("NUL")?;
-        let log_file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")?;
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)?;
         let handles = [inheritable(&nul)?, inheritable(&log_file)?];
 
         let mut command_line = Vec::new();
@@ -320,7 +401,12 @@ mod windows {
             },
             attributes: list,
         };
-        let mut process = ProcessInformation { process: 0, thread: 0, pid: 0, tid: 0 };
+        let mut process = ProcessInformation {
+            process: 0,
+            thread: 0,
+            pid: 0,
+            tid: 0,
+        };
         let flags = EXTENDED_STARTUPINFO_PRESENT
             | CREATE_NO_WINDOW
             | CREATE_NEW_PROCESS_GROUP
@@ -352,6 +438,9 @@ mod windows {
         }
         // SAFETY: CreateProcessW returned a valid thread handle.
         unsafe { CloseHandle(process.thread as *mut c_void) };
-        Ok(DetachedChild { pid: process.pid, handle: process.process })
+        Ok(DetachedChild {
+            pid: process.pid,
+            handle: process.process,
+        })
     }
 }

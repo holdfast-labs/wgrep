@@ -1027,7 +1027,6 @@ pub fn down() -> Result<serde_json::Value> {
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     fn empty_service() -> Service {
         Service {
             state: Mutex::new(State {
