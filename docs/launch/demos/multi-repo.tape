@@ -4,7 +4,7 @@ Output docs/launch/renders/raw/wg-multi-repo-16x9.mp4
 Set Shell "bash"
 Set Width 1920
 Set Height 820
-Set FontSize 43
+Set FontSize 41
 Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
 Set Padding 16

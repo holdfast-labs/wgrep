@@ -141,6 +141,9 @@ check_inputs() {
   (( count > 1000 )) || die "corpus looks too small: $count files in $CORPUS_SRC"
   log "corpus: $CORPUS_SRC ($count files)"
   log "wg: $WG_BIN"
+  command -v python3 >/dev/null || die "python3 is required to read the benchmark JSON"
+  TEXT_RATIO=$(python3 -c "import json; d=json.load(open('$ROOT/bench/WG_LAUNCH_BENCH_RESULTS.json')); print(f\"{d['text_absent_literal_rg_p50_ms']/d['text_absent_literal_wg_p50_ms']:.1f}\")")
+  log "text absent-literal ratio: ${TEXT_RATIO}x"
   log "run: $RUN"
   log "logs: $LOG_DIR"
 }
@@ -207,7 +210,7 @@ render_tape() {
     WG_LAUNCH_CORPUS="$corpus" \
     WG_SERVICE_DIR="$work/service" \
     HF_HUB_OFFLINE="$HF_HUB_OFFLINE" \
-    PATH="$(dirname "$WG_BIN"):$PATH" \
+    PATH="$(dirname "$RG_BIN"):$(dirname "$WG_BIN"):$PATH" \
       vhs "$tmp_tape" >"$LOG_DIR/vhs-${name}-${variant}.log" 2>&1
   ) || {
     stop_service "$work"
@@ -225,12 +228,16 @@ render_tape() {
 
 postprocess() {
   local name=$1 input=$2 output=$3 caption=$4 format=$5
-  local font vf caption_escaped
+  local font vf caption_escaped caption_size
   caption_escaped="${caption//:/\\:}"
+  caption_size=40
+  if [[ "$name" == wg-rg-flags ]]; then
+    caption_size=36
+  fi
   font=$(caption_font || true)
 
   if [[ -n "$font" && -n "$caption" ]]; then
-    vf="scale=1920:1000:force_original_aspect_ratio=decrease,pad=1920:1000:(ow-iw)/2:(oh-ih)/2:color=${MOCHA_BASE},pad=1920:1080:0:0:color=${MOCHA_CRUST},drawbox=x=0:y=1000:w=1920:h=2:color=${MOCHA_BLUE}@0.55:t=fill,drawtext=fontfile=${font}:text='${caption_escaped}':fontcolor=${MOCHA_TEXT}:fontsize=40:x=(w-text_w)/2:y=1014"
+    vf="scale=1920:1000:force_original_aspect_ratio=decrease,pad=1920:1000:(ow-iw)/2:(oh-ih)/2:color=${MOCHA_BASE},pad=1920:1080:0:0:color=${MOCHA_CRUST},drawbox=x=0:y=1000:w=1920:h=2:color=${MOCHA_BLUE}@0.55:t=fill,drawtext=fontfile=${font}:text='${caption_escaped}':fontcolor=${MOCHA_TEXT}:fontsize=${caption_size}:x=(w-text_w)/2:y=1014"
   else
     vf="scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=${MOCHA_BASE}"
   fi
@@ -343,8 +350,8 @@ assemble_hero() {
   size=$(stat -c%s "$out")
   duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out")
   log "hero: ${size} bytes, ${duration}s"
-  if awk "BEGIN {exit !($duration < 30 || $duration > 45)}"; then
-    log "WARN: hero duration is outside the 30-45 s target"
+  if awk "BEGIN {exit !($duration < 30 || $duration > 50)}"; then
+    log "WARN: hero duration is outside the 30-50 s target"
   fi
   if (( size > HERO_LIMIT_BYTES )); then
     log "WARN: hero still exceeds the 8 MB copy limit"
@@ -383,7 +390,7 @@ render_variant() {
     "$base/hook" "$base/hook/corpus/rust-src" "$variant"
   postprocess wg-rg-flags "$(cat "$RUN/tmp/.last-raw")" \
     "$RUN/final/wg-rg-flags-$variant.mp4" \
-    'The rg flags you know. One shared daemon.' "$variant"
+    "Built-in rg 15.1 + trigram index. ${TEXT_RATIO}x faster on rare terms. Same bytes." "$variant"
 
   render_tape wg-multi-repo "$LAUNCH/demos/multi-repo.tape" \
     "$HOME/code" "$HOME/code/rust" "$variant"

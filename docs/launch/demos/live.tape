@@ -31,13 +31,13 @@ Type "clear"
 Enter
 Sleep 500ms
 Show
-Type `wg -n -F round_secs .`
+Type `wg --no-heading -n -F round_secs .`
 Enter
 Sleep 2500ms
 Type `echo 'pub fn round_secs(t:f64)->u64{t.round() as u64}' >> live.rs`
 Enter
 Sleep 1000ms
-Type `wg -n -F round_secs .`
+Type `wg --no-heading -n -F round_secs .`
 Enter
 Sleep 3000ms
 Hide

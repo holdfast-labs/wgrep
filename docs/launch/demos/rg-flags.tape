@@ -3,8 +3,8 @@ Require rg
 Output docs/launch/renders/raw/wg-rg-flags-16x9.mp4
 Set Shell "bash"
 Set Width 1920
-Set Height 620
-Set FontSize 43
+Set Height 900
+Set FontSize 41
 Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
 Set Padding 16
@@ -31,15 +31,21 @@ Type "clear"
 Enter
 Sleep 500ms
 Show
-Type `wg -n -F "struct Flags" .`
+Type "export P=zzqxjwvbnm_wg_text_absent_zzz"
 Enter
-Sleep 2000ms
-Type `wg -l "fn normalize_args" .`
+Sleep 500ms
+Type "wg -F $P ."
 Enter
-Sleep 2000ms
-Type `wg -g "*.rs" -n -F "struct Flags" .`
+Sleep 1000ms
+Type "time rg -F $P ."
 Enter
-Sleep 3000ms
+Sleep 2500ms
+Type "time wg -F $P ."
+Enter
+Sleep 2500ms
+Type `wg --no-heading -n -F "struct Flags" .`
+Enter
+Sleep 2500ms
 Hide
 Type "wg down"
 Enter
