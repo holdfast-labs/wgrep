@@ -140,11 +140,11 @@ The gain is largest for rare or absent terms. On the 13,332-file Rust corpus:
 
 | Case | `wg` p50 | `rg` 15.1 p50 | Speed |
 | --- | ---: | ---: | ---: |
-| Absent literal | 4.9 ms | 52.4 ms | 10.7x |
-| Rare identifier | 5.2 ms | 52.5 ms | 10.1x |
-| Common identifier | 41.8 ms | 67.9 ms | 1.6x |
-| Broad regex | 96.6 ms | 110.8 ms | 1.1x |
-| Case-insensitive | 31.7 ms | 62.4 ms | 2.0x |
+| Absent literal | 5.4 ms | 63.2 ms | 11.7x |
+| Rare identifier | 6.0 ms | 63.8 ms | 10.6x |
+| Common identifier | 50.0 ms | 83.7 ms | 1.7x |
+| Broad regex | 111.5 ms | 136.1 ms | 1.2x |
+| Case-insensitive | 37.5 ms | 75.7 ms | 2.0x |
 
 All five cases were byte-identical to `rg` under `--sort path`. Common, broad,
 and case-insensitive cases still scan much of the tree. The index removes only
@@ -204,11 +204,11 @@ normally.
 
 The ranker is sgrep-compatible. On the launch corpus, warm top-10 rows and
 scores were identical to pinned sgrep on 5 of 5 queries. Warm semantic latency
-was 23.2 ms p50 for `wg` and 502.3 ms p50 for the sgrep CLI, 21.7x faster. This
+was 25.2 ms p50 for `wg` and 565.7 ms p50 for the sgrep CLI, 22.4x faster. This
 was a five-query mixture on one machine. The sgrep CLI pays process start and
 asset load on each call.
 
-With 16 concurrent clients, `wg` reached 149.0 queries/s against 5.7 for sgrep,
+With 16 concurrent clients, `wg` reached 140.9 queries/s against 5.5 for sgrep,
 with zero errors. The test used 10-second windows on 4 shared vCPU.
 
 ## One daemon, many roots
@@ -233,17 +233,17 @@ come from one campaign on a Debian 13 VPS with 4 vCPU, 7.8 GiB RAM, and no swap:
 
 | Tree | Files | `wg up` | Peak RSS | Steady RSS |
 | --- | ---: | ---: | ---: | ---: |
-| Rust `src` | 13,332 | 18.1 s | 634.9 MiB | 359.4 MiB |
-| Linux 7.2.9 | 94,318 | 592.3 s (9m 52s) | 3,905.7 MiB | 3,387.7 MiB |
+| Rust `src` | 13,332 | 18.4 s | 386.2 MiB | 212.7 MiB |
+| Linux 7.2.9 | 94,318 | 561.4 s (9m 21s) | 2,774.1 MiB | 2,040.5 MiB |
 
 The Linux tree now reaches ready on this 7.8 GiB machine. An earlier campaign
 was OOM-killed on the same tree. The build is CPU bound. The text index build is
-separate: 1.48 s for the Rust tree and 28.2 s for the Linux tree. The text index
+separate: 1.61 s for the Rust tree and 27.9 s for the Linux tree. The text index
 uses 20.4 MB on disk for the Rust tree and 247.0 MB for the Linux tree.
 
 These are single runs, not percentiles over many machines. Do not read them as a
 guarantee. A warm semantic query can raise RSS until the kernel reclaims mapped
-vector pages.
+vector and chunk-text pages.
 
 ## Status and stop
 
@@ -301,12 +301,15 @@ Current Windows performance has not been measured with the launch harness.
 - Semantic results are ranked, not exhaustive.
 - The text index only removes impossible files. Common terms still scan much of
   the tree.
-- Memory does not favor `wg` for many roots. Five attached 13.3k-file roots
-  used 1,447.5 MiB RSS, against 1,192.0 MiB for five warm sgrep processes. `wg`
-  uses 1.21x more memory. The sgrep number is the sum of live processes, not a
-  resident server. One shared model is true, but per-root index memory still
-  dominates.
-- A kernel-size tree takes about 10 minutes to attach on a 4-vCPU VPS with
+- Memory favors `wg` only at five roots, and the margin is small. Five attached
+  13.3k-file roots used 902.9 MiB RSS, against 1,034.1 MiB for five warm sgrep
+  processes: 12.7% less. This is not a general multi-repo win. At one root `wg`
+  used 282.6 MiB against 249.2 MiB (1.13x more); at three roots 606.9 MiB
+  against 499.8 MiB (1.21x more). `wg` stays below the sgrep per-process peak
+  sum at three and five roots. The sgrep number is the sum of live processes,
+  not a resident server. Mapped vector and chunk-text pages count in RSS after a
+  query touches them, until the kernel reclaims them.
+- A kernel-size tree takes about 9.5 minutes to attach on a 4-vCPU VPS with
   7.8 GiB RAM.
 - One daemon holds up to 32 attached roots.
 - The semantic route needs the model assets. The text route does not need the

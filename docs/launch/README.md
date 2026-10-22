@@ -18,8 +18,13 @@ The `wg` crate is at the repository root.
 - Render run: `/srv/projects/wispd/m/20261022-043511`
 - Logs: `/srv/logs/wispd/wg-launch-media-20261022-043511/`
 - Final assets are in `media/`, `charts/`, and `cards/`.
+- The charts are regenerated from the Phase E results JSON. The checked-in
+  rg-flags clip and the 16:9 hero still show Phase D chart and caption values.
+  Re-render both before release. The hook, live, and multi-repo clips and the
+  README GIFs show no stale benchmark number.
 - `E:\wg-launch-media\review\` has the eight chart PNGs and full-size final
-  frames for the four 16:9 clips and the 16:9 hero.
+  frames for the four 16:9 clips and the 16:9 hero. The Phase E charts are in
+  `E:\wg-launch-media\review\phaseE-charts\`.
 
 ## Corpus
 
@@ -108,7 +113,7 @@ Burned-in captions:
 - Hook: `rg: <count> files mention it. wg: the exact spot.` `<count>` is the
   real `rg` count on the render corpus (184 in this run).
 - Live edit: `New function. Next query finds it. No restart.`
-- rg flags: `Built-in rg 15.1 + trigram index. 10.7x faster on rare terms.
+- rg flags: `Built-in rg 15.1 + trigram index. 10.6x faster on rare terms.
   Same bytes.`
 - Two repositories: `One daemon. Two repositories.`
 
@@ -196,7 +201,7 @@ was tested and dropped: top-1 was a clippy duration test, not the new function.
 The rg-flags clip uses `export P=zzqxjwvbnm_wg_text_absent_zzz`, one visible
 `wg -F $P .` warmup, then `time rg -F $P .` and `time wg -F $P .`. It ends with
 `wg --no-heading -n -F "struct Flags" .` and real output. The caption uses the
-benchmark p50 ratio from the JSON (10.7x on the absent-literal case). The
+benchmark p50 ratio from the JSON (10.6x on the rare-identifier case). The
 visible one-shot times vary; the warmup makes the timed `wg` query warm.
 
 All four tapes are 16:9. They use font size 43, except the multi-repo clip at
@@ -224,13 +229,13 @@ chart cards at 1920x1080 and 1080x1080:
 
 Values from the results JSON:
 
-- Edit to searchable: `90.6 ms` vs `20,092 ms`, `222x faster`.
-- Warm query: `23.2 ms` vs `502.3 ms` p50, `21.7x faster`,
+- Edit to searchable: `99.2 ms` vs `21,806 ms` (21.8 s), `220x faster`.
+- Warm query: `25.2 ms` vs `565.7 ms` p50, `22.4x faster`,
   `identical top-10 results (5/5 queries)`.
-- 16 agents: `149.0 q/s` vs `5.7 q/s`, `26x throughput`, `0 errors`.
-- Text search: absent `4.9 ms` vs `52.4 ms`, rare `5.2` vs `52.5`,
-  common `41.8` vs `67.9`, broad `96.6` vs `110.8`,
-  case-insensitive `31.7` vs `62.4`; `10.7x faster on rare terms`,
+- 16 agents: `140.9 q/s` vs `5.5 q/s`, `25x throughput`, `0 errors`.
+- Text search: absent `5.4 ms` vs `63.2 ms`, rare `6.0` vs `63.8`,
+  common `50.0` vs `83.7`, broad `111.5` vs `136.1`,
+  case-insensitive `37.5` vs `75.7`; `10.6x faster on rare terms`,
   `byte-identical output`.
 
 The 16:9 hero uses `charts/*-1920x1080.png` as full-frame 3 s segments.
@@ -243,8 +248,10 @@ python3 docs/launch/make_charts.py
 
 The script fails if a label contains mojibake characters.
 
-The sgrep charts carry the caveat:
-`p50 | Rust src, 13.3k files | 4 vCPU VPS | sgrep CLI rev 0fbe8e5 (upstream project wg is derived from)`.
+The p50 charts (01 and 02) carry the caveat:
+`p50 · Rust src, 13.3k files · 4 vCPU VPS · sgrep CLI rev 0fbe8e5 (upstream project wg is derived from)`.
+The fan-out chart (03) carries:
+`10 s window, 16 concurrent clients · Rust src, 13.3k files · 4 vCPU VPS · sgrep CLI rev 0fbe8e5 (upstream project wg is derived from)`.
 The edit chart also says `sgrep has no watcher; it rebuilds the index`.
 
 The text chart carries:
@@ -267,7 +274,10 @@ square charts.
   built-in ripgrep 15.1 and trigram index. External rg 15.1 is used only for
   the comparison and the keyword count.
 - The charts use the single final benchmark campaign. No memory chart is
-  included because M4 does not favor wg.
+  included. At five attached 13.3k-file roots, one `wg` daemon uses 902.9 MiB
+  against 1,034.1 MiB for five warm sgrep processes (12.7% less). This is not
+  general: at one root `wg` uses 1.13x more, and at three roots 1.21x more. The
+  sgrep value is the sum of live processes, not a resident server.
 - The rg-flags clip uses one-shot shell `time`; the caption uses the benchmark
   p50 ratio from the JSON. The visible times can differ from the p50.
 - The live-edit clip uses exact text search for the freshness proof. The

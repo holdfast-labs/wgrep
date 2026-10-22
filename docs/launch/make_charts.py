@@ -35,6 +35,10 @@ FOOTNOTE = (
     "sgrep CLI rev 0fbe8e5 (upstream project wg is derived from)"
 )
 FRESHNESS_EXTRA = "sgrep has no watcher; it rebuilds the index"
+FANOUT_FOOTNOTE = (
+    "10 s window, 16 concurrent clients \u00b7 Rust src, 13.3k files \u00b7 "
+    "4 vCPU VPS \u00b7 sgrep CLI rev 0fbe8e5 (upstream project wg is derived from)"
+)
 TEXT_FOOTNOTE = (
     "rg 15.1 with default threads; wg uses its built-in ripgrep 15.1 plus a "
     "trigram index; 13.3k-file Rust src; 4 vCPU VPS"
@@ -105,6 +109,8 @@ def make_chart(
     margin = int(width * 0.045)
     panel(draw, width, height, margin)
 
+    footnote = spec.get("footnote", FOOTNOTE)
+
     for text in (
         spec["title"],
         spec["headline_number"],
@@ -114,7 +120,7 @@ def make_chart(
         spec["sgrep_label"],
         spec.get("direction", ""),
         spec.get("extra", ""),
-        FOOTNOTE,
+        footnote,
     ):
         assert_clean(text)
 
@@ -199,7 +205,7 @@ def make_chart(
             draw.text((pad_x, y), line, font=extra_font, fill=MOCHA["peach"])
             y += extra_font.size + 6
 
-    foot_lines = wrap_text(draw, FOOTNOTE, foot_font, width - 2 * pad_x)
+    foot_lines = wrap_text(draw, footnote, foot_font, width - 2 * pad_x)
     y = max(y, foot_y)
     for line in foot_lines:
         draw.text((pad_x, y), line, font=foot_font, fill=MOCHA["subtext0"])
@@ -351,7 +357,7 @@ def build_specs(results: dict) -> list[dict]:
                 "rg_label": f"{results[f'{key}_rg_p50_ms']:.1f} ms",
             }
         )
-    text_ratio = results["text_absent_literal_rg_p50_ms"] / results["text_absent_literal_wg_p50_ms"]
+    text_ratio = results["text_rare_identifier_rg_p50_ms"] / results["text_rare_identifier_wg_p50_ms"]
 
     return [
         {
@@ -392,6 +398,7 @@ def build_specs(results: dict) -> list[dict]:
             "wg_label": f"{fanout_wg:.1f} q/s",
             "sgrep_label": f"{fanout_sgrep:.1f} q/s",
             "direction": "queries per second, higher is better",
+            "footnote": FANOUT_FOOTNOTE,
         },
         {
             "name": "04-text-vs-ripgrep",

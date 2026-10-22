@@ -142,8 +142,8 @@ check_inputs() {
   log "corpus: $CORPUS_SRC ($count files)"
   log "wg: $WG_BIN"
   command -v python3 >/dev/null || die "python3 is required to read the benchmark JSON"
-  TEXT_RATIO=$(python3 -c "import json; d=json.load(open('$ROOT/bench/WG_LAUNCH_BENCH_RESULTS.json')); print(f\"{d['text_absent_literal_rg_p50_ms']/d['text_absent_literal_wg_p50_ms']:.1f}\")")
-  log "text absent-literal ratio: ${TEXT_RATIO}x"
+  TEXT_RATIO=$(python3 -c "import json; d=json.load(open('$ROOT/bench/WG_LAUNCH_BENCH_RESULTS.json')); print(f\"{d['text_rare_identifier_rg_p50_ms']/d['text_rare_identifier_wg_p50_ms']:.1f}\")")
+  log "text rare-identifier ratio: ${TEXT_RATIO}x"
   log "run: $RUN"
   log "logs: $LOG_DIR"
 }
