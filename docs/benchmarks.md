@@ -21,7 +21,7 @@ Full method, raw-record paths and caveats are in
 | One-file edit to first correct result, p50 | 90.6 ms | 20,092 ms | 222x faster. sgrep has no watcher and rebuilds its index. |
 | Warm semantic query, p50 | 23.2 ms | 502.3 ms | 21.7x faster. Top-10 rows and scores identical on 5/5 queries. |
 | 16 concurrent clients, throughput | 149.0 q/s | 5.7 q/s | 26.2x. 0 errors or timeouts on either side. |
-| Five attached repositories, RSS | 1.45 GiB | 1.19 GiB | wg uses 1.21x the memory. Honest negative. |
+| Five attached repositories, RSS | 1,447.5 MiB | 1,192.0 MiB | wg uses 1.21x the memory. Honest negative. |
 | Text search vs direct `rg 15.1`, p50 | 4.9 / 5.2 / 41.8 / 96.6 / 31.7 ms | 52.4 / 52.5 / 67.9 / 110.8 / 62.4 ms (rg) | Faster on all five cases; byte-identical output. |
 
 One final campaign on one 4 vCPU VPS. sgrep runs one process per query; wg
@@ -122,11 +122,15 @@ code.
 
 ## Windows
 
-Windows 11 x64, separate corpus copy: 13,328 files, 63,767 chunks, 32,908 ms
-index build, 361 ms model setup, 33,396 ms total, 34,487 ms wall. The run
-created the Rust parser asset, so it was not a fully cached-parser run. Repeat
-attach took 164 ms wall. Windows warm-query and edit-visibility numbers have
-not been measured with this harness.
+The only Windows numbers are from an old 2026-10-18 preview build, before the
+memory, async-up and text-index work. They were not re-measured on the final
+code. Do not use them as current numbers.
+
+Preview build, Windows 11 x64, separate corpus copy: 13,328 files, 63,767
+chunks, 32,908 ms index build, 361 ms model setup, 33,396 ms total, 34,487 ms
+wall. The run created the Rust parser asset, so it was not a fully
+cached-parser run. Repeat attach took 164 ms wall. Windows warm-query and
+edit-visibility numbers have not been measured with this harness.
 
 ## Reproduce
 

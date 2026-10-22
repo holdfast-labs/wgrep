@@ -1,14 +1,18 @@
 # wg
 
-> One local front door for semantic code search and ripgrep-compatible
-> filesystem search, backed by one shared daemon.
+> One local binary for sgrep-compatible semantic code search and exact
+> ripgrep-compatible text search, with one shared daemon for semantic search
+> and text-index pruning.
 
-## Install from source
+## Install
 
-cargo install --locked --path crates/wgrep-sgrep-core --bin wg
+cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
 
-Requirements: Rust 1.90+, ripgrep (`rg`) on PATH, network on the first run
-(about 33.5 MB for the code model, plus parser assets).
+From a checkout: `cargo install --locked --path . --bin wg`.
+
+Requirements: Rust 1.95+, Linux x64 or Windows x64 (macOS is not qualified),
+and network access on the first semantic run for the pinned model and parser
+assets. No `rg` binary is needed. Release archives ship only the `wg` binary.
 
 ## Docs
 
@@ -19,19 +23,30 @@ Requirements: Rust 1.90+, ripgrep (`rg`) on PATH, network on the first run
 ## Commands
 
 - wg up [PATH] [--model auto|code|text] [--json]
-- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain]
+- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text]
 - wg [RIPGREP-FLAGS] PATTERN [PATH...]
 - wg status [--json]
 - wg down
 
 ## Contract
 
-- Default route is sgrep-compatible semantic ranking. `--top N` / `-k N` sets
-  the count (1..=100, default 5). `-n` means ripgrep line numbers.
-- A ripgrep flag (`-F`, `-e`, `-n`, `-l`, `-g`, `--files`) selects exact
-  filesystem search through an authoritative `rg` child in the same daemon.
-- `--json` alone is semantic JSON. `--json` with ripgrep flags is ripgrep JSON.
-- One daemon PID and one shared model pool serve every attached repository.
-- Semantic scope is one whole attached repository. File or subdirectory semantic
+- Default route is sgrep-compatible semantic ranking. The parity reference is
+  pinned sgrep revision `0fbe8e5`. Results are ranked, not exhaustive.
+  `--top N` / `-k N` sets the count (1..=100, default 5).
+- A ripgrep flag (`-F`, `-e`, `-n`, `-l`, `-g`, `--files`, and others) selects
+  the in-process ripgrep 15.1 engine. Output, exit status, ignore rules, and
+  encodings follow `rg` 15.1.0. No `rg` binary is needed.
+- The daemon keeps one live semantic index and one trigram text index per
+  attached root. One watcher per root feeds both indexes. One model pool is
+  shared between roots.
+- The text index skips files that cannot match. It falls back to a full scan
+  when freshness is uncertain or the invocation is not a default walk.
+- `--json` alone is a semantic JSON array. `--json` with ripgrep flags is
+  ripgrep JSON events.
+- Semantic scope is one whole attached root. A file or subdirectory semantic
   scope returns an explicit error.
-- Exit codes: 0 matches, 1 no matches, 2 error.
+- `wg status --json` reports readiness. A ready root has `ready: true`,
+  `pending: 0`, and `text` not null or `text_error` a string.
+- `wg up` is safe under captured output. The daemon is detached and inherits
+  only its log.
+- Exit codes: 0 matches or success, 1 no matches, 2 error.

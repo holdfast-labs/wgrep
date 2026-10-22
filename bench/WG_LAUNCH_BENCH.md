@@ -97,7 +97,7 @@ processes. sgrep runs one CLI process per client; wg clients share one daemon.
 
 wg saturates near 149 queries/s on 4 vCPU. At 16 clients wg has 26.2x the
 throughput and 24.9x lower p50 latency, with zero errors. The wg daemon keeps
-about 0.42 GiB RSS at every client count. The sgrep column is the observed peak
+about 430 MiB RSS at every client count. The sgrep column is the observed peak
 of the sum of live processes.
 
 ## M4. Multi-repo memory
@@ -185,7 +185,7 @@ number.
 4. **"16 agents: wg 149 queries/s vs 5.7 (26.2x); p50 105 ms vs 2.62 s; zero
    errors."** [M3] Caveat: 10 s windows on 4 shared vCPU; wg saturates near
    149 queries/s.
-5. **"One daemon serves 16 agents at 0.43 GiB RSS."** [M3] Caveat: the clients
+5. **"One daemon serves 16 agents at 431.5 MiB RSS."** [M3] Caveat: the clients
    and the corpus are on the same machine; this is resident RSS, not virtual
    memory.
 6. **"Text search with the index: absent 4.9 ms vs 52.4 ms (10.7x); rare
@@ -197,10 +197,10 @@ number.
    [T2] Caveat: fixed four-query mixture, one rep, 4 vCPU; wg saturates near
    31 queries/s.
 8. **Do not tweet a multi-repo memory win.** [M4] Five roots on one wg daemon
-   use 1.45 GiB RSS; five warm sgrep processes use 1.19 GiB (1.21x more for
-   wg). One shared model is true, but per-root index RSS still dominates.
-9. **"The 1.62 GB Linux tree now attaches: `wg up` 9m 52s, 3.91 GiB peak,
-   3.39 GiB steady."** [S1] Caveat: one 4-vCPU VPS with no swap; the earlier
+   use 1,447.5 MiB RSS; five warm sgrep processes use 1,192.0 MiB (1.21x more
+   for wg). One shared model is true, but per-root index RSS still dominates.
+9. **"The 1.62 GB Linux tree now attaches: `wg up` 9m 52s, 3,905.7 MiB peak,
+   3,387.7 MiB steady."** [S1] Caveat: one 4-vCPU VPS with no swap; the earlier
    build was OOM-killed; the time is CPU bound.
 
 ## Limits
