@@ -8,7 +8,7 @@ corpus copy and are not an apples-to-apples ratio.
 Setup and search latency are different measurements. Do not infer one from the
 other.
 
-## Comparison with sgrep (2026-10-21)
+## Comparison with sgrep (2026-10-22)
 
 `wg` is now one binary: sgrep-identical semantic ranking plus the built-in
 ripgrep 15.1 text route and trigram index in one daemon. This campaign compares
@@ -18,11 +18,11 @@ Full method, raw-record paths and caveats are in
 
 | Measure | wg | sgrep CLI | Result |
 | --- | ---: | ---: | --- |
-| One-file edit to first correct result, p50 | 90.6 ms | 20,092 ms | 222x faster. sgrep has no watcher and rebuilds its index. |
-| Warm semantic query, p50 | 23.2 ms | 502.3 ms | 21.7x faster. Top-10 rows and scores identical on 5/5 queries. |
-| 16 concurrent clients, throughput | 149.0 q/s | 5.7 q/s | 26.2x. 0 errors or timeouts on either side. |
-| Five attached repositories, RSS | 1,447.5 MiB | 1,192.0 MiB | wg uses 1.21x the memory. Honest negative. |
-| Text search vs direct `rg 15.1`, p50 | 4.9 / 5.2 / 41.8 / 96.6 / 31.7 ms | 52.4 / 52.5 / 67.9 / 110.8 / 62.4 ms (rg) | Faster on all five cases; byte-identical output. |
+| One-file edit to first correct result, p50 | 99.2 ms | 21,806 ms | 220x faster. sgrep has no watcher and rebuilds its index. |
+| Warm semantic query, p50 | 25.2 ms | 565.7 ms | 22.4x faster. Top-10 rows and scores identical on 5/5 queries. |
+| 16 concurrent clients, throughput | 140.9 q/s | 5.5 q/s | 25.4x. 0 errors or timeouts on either side. |
+| Five attached repositories, RSS | 902.9 MiB | 1,034.1 MiB | wg uses 12.7% less. At 1 and 3 roots wg still uses more. |
+| Text search vs direct `rg 15.1`, p50 | 5.4 / 6.0 / 50.0 / 111.5 / 37.5 ms | 63.2 / 63.8 / 83.7 / 136.1 / 75.7 ms (rg) | Faster on all five cases; byte-identical output. |
 
 One final campaign on one 4 vCPU VPS. sgrep runs one process per query; wg
 answers through its resident daemon. The text route is an in-process ripgrep
@@ -35,13 +35,13 @@ sampled at 50 ms. Steady RSS was sampled 2 s after ready.
 
 | Corpus | Files | Semantic chunks | `wg up` | Text build | Peak RSS | Steady RSS | Text index |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Rust `prof/src` | 13,332 | 63,786 | 18.1 s | 1.48 s | 634.9 MiB | 359.4 MiB | 13,289 files, 20.4 MB |
-| Linux 7.2.9 | 94,318 | 1,088,574 | 592.3 s | 28.2 s | 3,905.7 MiB | 3,387.7 MiB | 94,316 files, 247.0 MB |
+| Rust `prof/src` | 13,332 | 63,786 | 18.4 s | 1.61 s | 386.2 MiB | 212.7 MiB | 13,289 files, 20.4 MB |
+| Linux 7.2.9 | 94,318 | 1,088,574 | 561.4 s | 27.9 s | 2,774.1 MiB | 2,040.5 MiB | 94,316 files, 247.0 MB |
 
-The Linux tree now reaches ready on this 7.8 GiB machine; the earlier campaign
-was OOM-killed on the same tree. Model and parser assets were cached, and
-`HF_HUB_OFFLINE=1` blocked downloads. A repeat `wg up` on an attached root
-returns immediately and keeps the same daemon PID.
+The Linux tree reaches ready on this 7.8 GiB machine. Streaming chunk text into
+the snapshot lowered peak and steady RSS against the 2026-10-21 run. Model and
+parser assets were cached, and `HF_HUB_OFFLINE=1` blocked downloads. A repeat
+`wg up` on an attached root returns immediately and keeps the same daemon PID.
 
 ## Warm semantic latency
 
@@ -52,8 +52,8 @@ Warm daemon and OS cache, 13,332-file root, `--model code`, top 10.
 
 | Tool | p50 | p95 | Errors |
 | --- | ---: | ---: | ---: |
-| wg | 23.2 ms | 26.6 ms | 0 |
-| sgrep CLI | 502.3 ms | 529.8 ms | 0 |
+| wg | 25.2 ms | 29.8 ms | 0 |
+| sgrep CLI | 565.7 ms | 624.5 ms | 0 |
 
 The row is a declared mixture, not a per-query percentile. Process start,
 loopback IPC, and daemon-side work are included. Top-10 rows and scores were
@@ -67,10 +67,10 @@ that returns the new symbol. 30 samples; warmups excluded.
 
 | Samples | min | p50 | p95 | max | Errors |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 30 | 84.0 ms | 90.6 ms | 92.9 ms | 96.2 ms | 0 |
+| 30 | 84.3 ms | 99.2 ms | 111.9 ms | 115.2 ms | 0 |
 
 The pinned sgrep comparison ran after each sample, outside the interval. It
-rebuilt its whole index in 6 of 6 samples and took 20.1 s at p50. Final results
+rebuilt its whole index in 6 of 6 samples and took 21.8 s at p50. Final results
 also matched a freshly built pinned sgrep index exactly, with no score or
 ordering differences.
 
@@ -83,11 +83,11 @@ case. All five cases used the daemon index and were byte-identical to rg under
 
 | Case | Pattern | wg p50 | wg p95 | rg p50 | rg p95 | wg / rg p50 | Output bytes / lines |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Absent literal | `zzqxjwvbnm_wg_text_absent_zzz` | 4.9 ms | 5.8 ms | 52.4 ms | 65.4 ms | 0.09 | 0 / 0 |
-| Rare identifier | `genericargs` | 5.2 ms | 6.4 ms | 52.5 ms | 61.0 ms | 0.10 | 107 / 1 |
-| Common identifier | `let` | 41.8 ms | 53.6 ms | 67.9 ms | 86.3 ms | 0.62 | 16,197,218 / 136,359 |
-| Broad regex | `\w+\(` | 96.6 ms | 128.2 ms | 110.8 ms | 126.3 ms | 0.87 | 45,694,788 / 414,206 |
-| Case-insensitive | `-i -F error` | 31.7 ms | 37.5 ms | 62.4 ms | 75.8 ms | 0.51 | 5,321,683 / 34,567 |
+| Absent literal | `zzqxjwvbnm_wg_text_absent_zzz` | 5.4 ms | 6.5 ms | 63.2 ms | 78.5 ms | 0.09 | 0 / 0 |
+| Rare identifier | `genericargs` | 6.0 ms | 8.6 ms | 63.8 ms | 72.4 ms | 0.09 | 107 / 1 |
+| Common identifier | `let` | 50.0 ms | 55.7 ms | 83.7 ms | 97.3 ms | 0.60 | 16,197,218 / 136,359 |
+| Broad regex | `\w+\(` | 111.5 ms | 132.0 ms | 136.1 ms | 151.9 ms | 0.82 | 45,694,788 / 414,206 |
+| Case-insensitive | `-i -F error` | 37.5 ms | 44.2 ms | 75.7 ms | 85.3 ms | 0.50 | 5,321,683 / 34,567 |
 
 The absent and rare cases show the index prune. Common, broad and
 case-insensitive cases still scan much of the tree; the index removes only
@@ -102,12 +102,12 @@ Throughput is completed queries divided by makespan.
 
 | Clients | wg q/s | wg p50 | wg p95 | wg n | rg q/s | rg p50 | rg p95 | rg n | Errors |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 27.8 | 22.7 ms | 86.4 ms | 4 | 14.6 | 57.1 ms | 104.7 ms | 4 | 0 |
-| 4 | 29.9 | 102.5 ms | 335.0 ms | 16 | 15.1 | 240.4 ms | 447.3 ms | 16 | 0 |
-| 16 | 29.9 | 293.5 ms | 1,423.9 ms | 64 | 16.0 | 811.4 ms | 1,738.3 ms | 64 | 0 |
-| 32 | 31.5 | 835.3 ms | 2,732.8 ms | 128 | 16.1 | 1,528.0 ms | 3,505.2 ms | 128 | 0 |
+| 1 | 21.9 | 29.1 ms | 109.4 ms | 4 | 11.8 | 76.9 ms | 118.7 ms | 4 | 0 |
+| 4 | 28.1 | 70.7 ms | 410.7 ms | 16 | 14.1 | 248.7 ms | 501.7 ms | 16 | 0 |
+| 16 | 26.0 | 340.1 ms | 1,727.1 ms | 64 | 12.6 | 1,017.5 ms | 2,258.2 ms | 64 | 0 |
+| 32 | 26.1 | 728.4 ms | 3,331.5 ms | 128 | 14.5 | 1,761.6 ms | 3,798.9 ms | 128 | 0 |
 
-`wg` saturates near 31 text queries/s on 4 vCPU, about 1.9-2.0x rg. All clients
+`wg` saturates near 26 text queries/s on 4 vCPU, about 1.8-2.1x rg. All clients
 share one daemon and one index. The 1-client row has only 4 requests, so its
 p95 is weak.
 
@@ -115,10 +115,10 @@ p95 is weak.
 
 The first live implementation copied and re-encoded the whole snapshot on each
 update. The current implementation shares unchanged file, chunk, and vector
-records and maps the base vectors. The measured edit visibility changed from
-1,879.7 ms p50 (whole-snapshot copy) to 90.6 ms p50 in this campaign. The
-earlier preview trade-off is superseded; this campaign measured only the final
-code.
+records, maps the base vectors, and streams chunk text into a memory-mapped
+snapshot. The measured edit visibility changed from 1,879.7 ms p50
+(whole-snapshot copy) to 99.2 ms p50 in this campaign. The earlier preview
+trade-off is superseded; this campaign measured only the final code.
 
 ## Windows
 
