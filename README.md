@@ -284,6 +284,7 @@ Current Windows performance has not been measured with the launch harness.
 
 ## More
 
+- Architecture and internals: [docs/how-it-works.md](docs/how-it-works.md)
 - Agent setup, JSON shapes, and exit codes:
   [docs/agent-guide.md](docs/agent-guide.md)
 - Measured setup numbers and method:
