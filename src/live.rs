@@ -3,7 +3,7 @@ use crate::{
     CODE, Chunk, LoadedModel, ModelChoice, Result, TEXT, cache, identifier_pattern, is_prose,
     make_chunk, rank_impl, words,
 };
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -18,10 +18,11 @@ use std::time::Instant;
 /// Snapshot cache identity and bounds. Bump `SNAPSHOT_VERSION` when the chunk
 /// ranges or vector layout change, not merely when unrelated ranking changes.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"WGSNAP\0\0";
-/// Version 3 stores chunk text and then the passage vectors, after all per-file
-/// metadata, so a snapshot can be memory-mapped and served without copying
-/// either to the heap. Version 2 files are rejected once and rebuilt.
-const SNAPSHOT_VERSION: u32 = 3;
+/// Version 4 stores chunk text and the passage vectors in one memory-mapped
+/// snapshot. Text and metadata may appear in either order, which lets a cold
+/// build stream text while files are read. Older files are rejected and
+/// rebuilt.
+const SNAPSHOT_VERSION: u32 = 4;
 /// Fold heap vectors back into a mapped snapshot after this many of them.
 const VECTOR_FOLD_HEAP: usize = 65_536;
 /// An upper bound on cached chunk rows. A cache above it is ignored; a
@@ -57,6 +58,42 @@ fn trim_allocator() {
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn trim_allocator() {}
+
+/// Let glibc release freed text pages from worker arenas as they are freed.
+///
+/// `malloc_trim` only trims the main arena, but a zero trim threshold applies
+/// to every arena at free time. A cold build allocates chunk text on rayon
+/// workers and frees it on the main thread; without this the worker arenas
+/// keep about a third of the text resident after the build.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_allocator() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_TRIM_THRESHOLD: i32 = -1;
+    unsafe {
+        mallopt(M_TRIM_THRESHOLD, 0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_allocator() {}
+
+/// Restore the glibc default trim threshold after a cold build. Queries should
+/// not pay free-time trimming for small allocations.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn restore_allocator() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_TRIM_THRESHOLD: i32 = -1;
+    unsafe {
+        mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn restore_allocator() {}
 
 /// Phase timing for index builds. Off by default; `WG_LIVE_TIMING=1` prints
 /// one line per phase to stderr so a slow repository can be profiled without a
@@ -599,6 +636,51 @@ fn write_field(writer: &mut impl Write, bytes: &[u8], cap: usize) -> Result<()> 
     Ok(())
 }
 
+/// The fixed header length for one root and model. Counts and offsets are
+/// fixed-width, so this does not depend on the build result.
+fn snapshot_header_len(root: &Path, model: &LoadedModel) -> Result<usize> {
+    Ok(snapshot_header(root, model, 0, 0, 0, 0, 0, 0, 0, 0)?.len())
+}
+
+/// Build the v4 header. Text and metadata may be stored in either order; both
+/// absolute offsets are recorded so the reader never assumes an order.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_header(
+    root: &Path,
+    model: &LoadedModel,
+    generation: u64,
+    file_count: usize,
+    chunk_count: usize,
+    meta_len: usize,
+    text_base: usize,
+    text_len: usize,
+    meta_base: usize,
+    vector_base: usize,
+) -> Result<Vec<u8>> {
+    let mut header = Vec::new();
+    header.extend_from_slice(SNAPSHOT_MAGIC);
+    header.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+    write_field(
+        &mut header,
+        root.as_os_str().as_encoded_bytes(),
+        SNAPSHOT_MAX_META,
+    )?;
+    write_field(
+        &mut header,
+        model.revision().as_bytes(),
+        SNAPSHOT_MAX_META,
+    )?;
+    header.extend_from_slice(&generation.to_le_bytes());
+    header.extend_from_slice(&(file_count as u32).to_le_bytes());
+    header.extend_from_slice(&(chunk_count as u32).to_le_bytes());
+    header.extend_from_slice(&(meta_len as u64).to_le_bytes());
+    header.extend_from_slice(&(text_base as u64).to_le_bytes());
+    header.extend_from_slice(&(text_len as u64).to_le_bytes());
+    header.extend_from_slice(&(meta_base as u64).to_le_bytes());
+    header.extend_from_slice(&(vector_base as u64).to_le_bytes());
+    Ok(header)
+}
+
 fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
     #[cfg(unix)]
     {
@@ -791,23 +873,31 @@ fn load_snapshot_cache(
     let meta_len = cursor.u64()? as usize;
     let text_base = cursor.u64()? as usize;
     let text_section_len = cursor.u64()? as usize;
+    let meta_base = cursor.u64()? as usize;
     let vector_base = cursor.u64()? as usize;
     if file_count > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
         return Err("snapshot cache header count exceeds bound".into());
     }
-    // Layout: header, metadata, text, alignment padding, vectors. Every offset
-    // is checked against the file before any slice is made.
-    if text_base
-        .checked_sub(cursor.at)
-        .is_none_or(|len| len != meta_len)
-    {
-        return Err("snapshot cache metadata length is invalid".into());
+    // Layout: header, then text and metadata in either order, padding, and
+    // vectors. Every offset is checked against the file before any slice.
+    let header_end = cursor.at;
+    if meta_base < header_end || text_base < header_end {
+        return Err("snapshot cache section overlaps the header".into());
     }
-    if text_base
+    let text_end = text_base
         .checked_add(text_section_len)
-        .is_none_or(|end| end > vector_base)
-    {
+        .ok_or("snapshot cache text section overflow")?;
+    if text_end > map.len() {
         return Err("snapshot cache text section exceeds the file".into());
+    }
+    let meta_end = meta_base
+        .checked_add(meta_len)
+        .ok_or("snapshot cache metadata overflow")?;
+    if meta_end > vector_base || meta_end > map.len() {
+        return Err("snapshot cache metadata exceeds the file".into());
+    }
+    if text_base < meta_end && meta_base < text_end {
+        return Err("snapshot cache text and metadata overlap".into());
     }
     let vector_end = vector_base
         .checked_add(total_chunks * 256 * 4)
@@ -820,12 +910,13 @@ fn load_snapshot_cache(
     if vector_base % std::mem::align_of::<f32>() != 0 {
         return Err("snapshot cache vector section is misaligned".into());
     }
-    // The metadata starts right after the header and ends at `text_base`.
+    let mut meta_cursor =
+        Cursor::new(map.get(meta_base..).ok_or("snapshot cache metadata is truncated")?);
     let mut entries: Vec<CachedEntry> = Vec::with_capacity(file_count.min(4096));
     let mut paths: HashSet<PathBuf> = HashSet::with_capacity(file_count.min(4096));
     let mut seen_chunks = 0usize;
     for _ in 0..file_count {
-        let rel = path_from_bytes(cursor.field(SNAPSHOT_MAX_PATH)?);
+        let rel = path_from_bytes(meta_cursor.field(SNAPSHOT_MAX_PATH)?);
         if rel.as_os_str().is_empty()
             || rel.is_absolute()
             || rel.components().any(|c| {
@@ -843,8 +934,8 @@ fn load_snapshot_cache(
             return Err("snapshot cache has a duplicate path".into());
         }
         let mut digest = [0u8; 32];
-        digest.copy_from_slice(cursor.take(32)?);
-        let chunk_count = cursor.u32()? as usize;
+        digest.copy_from_slice(meta_cursor.take(32)?);
+        let chunk_count = meta_cursor.u32()? as usize;
         if chunk_count > SNAPSHOT_MAX_CHUNKS
             || seen_chunks
                 .checked_add(chunk_count)
@@ -854,10 +945,10 @@ fn load_snapshot_cache(
         }
         let mut chunks = Vec::with_capacity(chunk_count.min(1024));
         for _ in 0..chunk_count {
-            let start = cursor.u32()? as usize;
-            let end = cursor.u32()? as usize;
-            let text_offset = cursor.u64()? as usize;
-            let chunk_text_len = cursor.u32()? as usize;
+            let start = meta_cursor.u32()? as usize;
+            let end = meta_cursor.u32()? as usize;
+            let text_offset = meta_cursor.u64()? as usize;
+            let chunk_text_len = meta_cursor.u32()? as usize;
             if text_offset
                 .checked_add(chunk_text_len)
                 .is_none_or(|end| end > text_section_len)
@@ -883,7 +974,7 @@ fn load_snapshot_cache(
     if seen_chunks != total_chunks {
         return Err("snapshot cache chunk total mismatch".into());
     }
-    if cursor.at != text_base {
+    if meta_cursor.at != meta_len {
         return Err("snapshot cache metadata length mismatch".into());
     }
     // Rebuild the per-file rows on the worker pool, in bounded batches. A
@@ -1221,31 +1312,15 @@ struct FoldedSnapshot {
     generation: u64,
 }
 
-/// Write the header, per-file metadata and text section of a v3 snapshot.
-///
-/// The file is opened read+write so the text section can be mapped through the
-/// same handle before the vectors are appended. Layout: header, metadata, text,
-/// alignment padding, vectors. The header carries all three offsets so the
-/// reader can validate every section.
-fn write_snapshot_text(
-    base: &Path,
-    root: &Path,
-    model: &LoadedModel,
-    generation: u64,
+/// Build the per-file metadata block and its text length. Chunks are written in
+/// chunk-id order, so text offsets are the running sum of content lengths.
+fn build_snapshot_metadata(
     ordered: &[PathBuf],
     files: &HashMap<PathBuf, Arc<FileData>>,
-) -> Result<SnapshotText> {
+) -> Result<(Vec<u8>, usize, usize)> {
     let total_chunks: usize = ordered.iter().map(|rel| files[rel].chunks.len()).sum();
     if files.len() > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
         return Err("snapshot exceeds cache bounds".into());
-    }
-    let mut text_len = 0usize;
-    for rel in ordered {
-        for chunk in &files[rel].chunks {
-            text_len = text_len
-                .checked_add(chunk.content.as_str().len())
-                .ok_or("snapshot text section overflows")?;
-        }
     }
     let mut meta = Vec::with_capacity(total_chunks.saturating_mul(20));
     let mut text_offset = 0u64;
@@ -1275,38 +1350,86 @@ fn write_snapshot_text(
                 .ok_or("snapshot text section overflows")?;
         }
     }
-    if text_offset as usize != text_len {
-        return Err("snapshot text length mismatch".into());
+    let text_len = usize::try_from(text_offset).map_err(|_| "snapshot text section overflows")?;
+    Ok((meta, text_len, total_chunks))
+}
+
+fn align_down(value: usize, align: usize) -> usize {
+    value & !(align - 1)
+}
+
+/// One file waiting for its text to be mapped during a streamed cold build.
+struct StreamFile {
+    rel: PathBuf,
+    digest: [u8; 32],
+    lexical: FileLexical,
+    /// Each chunk and its absolute text offset in the new snapshot.
+    chunks: Vec<(Arc<Chunk>, usize)>,
+}
+
+/// Embed one batch of texts and append the resulting vectors to the scratch
+/// file in chunk-id order.
+fn flush_embed_batch(
+    model: &LoadedModel,
+    writer: &mut impl Write,
+    texts: &mut Vec<String>,
+    vector_bytes: &mut u64,
+    progress: Option<&BuildProgress>,
+) -> Result<()> {
+    if texts.is_empty() {
+        return Ok(());
     }
-    let mut header = Vec::new();
-    header.extend_from_slice(SNAPSHOT_MAGIC);
-    header.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
-    write_field(
-        &mut header,
-        root.as_os_str().as_encoded_bytes(),
-        SNAPSHOT_MAX_META,
-    )?;
-    write_field(
-        &mut header,
-        model.revision().as_bytes(),
-        SNAPSHOT_MAX_META,
-    )?;
-    header.extend_from_slice(&generation.to_le_bytes());
-    header.extend_from_slice(&(files.len() as u32).to_le_bytes());
-    header.extend_from_slice(&(total_chunks as u32).to_le_bytes());
-    let fields_end = header.len();
-    let text_base = fields_end
-        .checked_add(32)
-        .and_then(|at| at.checked_add(meta.len()))
+    let vectors = model.embed_parallel(texts)?;
+    for vector in &vectors {
+        if vector.len() != 256 {
+            return Err("snapshot cache vector width is not 256".into());
+        }
+        for value in vector {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+    }
+    *vector_bytes += vectors.len() as u64 * 256 * 4;
+    if let Some(progress) = progress {
+        progress.add_encoded(vectors.len());
+    }
+    texts.clear();
+    Ok(())
+}
+
+/// Write the header, per-file metadata and text section of a v4 snapshot.
+///
+/// The file is opened read+write so the text section can be mapped through the
+/// same handle before the vectors are appended. Layout: header, metadata, text,
+/// alignment padding, vectors. The header carries all three offsets so the
+/// reader can validate every section.
+fn write_snapshot_text(
+    base: &Path,
+    root: &Path,
+    model: &LoadedModel,
+    generation: u64,
+    ordered: &[PathBuf],
+    files: &HashMap<PathBuf, Arc<FileData>>,
+) -> Result<SnapshotText> {
+    let (meta, text_len, total_chunks) = build_snapshot_metadata(ordered, files)?;
+    let meta_base = snapshot_header_len(root, model)?;
+    let text_base = meta_base
+        .checked_add(meta.len())
         .ok_or("snapshot header overflows")?;
     let pad = (4 - (text_base + text_len) % 4) % 4;
     let vector_base = text_base + text_len + pad;
-    header.extend_from_slice(&(meta.len() as u64).to_le_bytes());
-    header.extend_from_slice(&(text_base as u64).to_le_bytes());
-    header.extend_from_slice(&(text_len as u64).to_le_bytes());
-    header.extend_from_slice(&(vector_base as u64).to_le_bytes());
-    debug_assert_eq!(header.len(), fields_end + 32);
-    debug_assert_eq!(header.len() + meta.len(), text_base);
+    let header = snapshot_header(
+        root,
+        model,
+        generation,
+        files.len(),
+        total_chunks,
+        meta.len(),
+        text_base,
+        text_len,
+        meta_base,
+        vector_base,
+    )?;
+    debug_assert_eq!(header.len(), meta_base);
 
     if let Some(parent) = base.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1909,6 +2032,18 @@ impl LiveIndex {
                 return Err("directory refresh requires reconcile=true".into());
             }
         }
+        // A cold build with a cache has no reusable rows. Stream its text to
+        // the new snapshot during preparation and embed each batch while its
+        // heap text is still hot, instead of writing text and reading it back
+        // during the fold.
+        if self.cache.is_some()
+            && !self.cache_ready.load(Ordering::Relaxed)
+            && old.chunks.is_empty()
+            && reconcile
+            && self.choice != ModelChoice::Auto
+        {
+            return self.build_streamed(&old, &target, &selected, progress, started);
+        }
         let timings = BuildTimings::default();
         if let Some(progress) = progress {
             progress.set_stage(STAGE_READ);
@@ -2313,6 +2448,333 @@ impl LiveIndex {
         Ok(UpdateStats {
             changed_files: changed,
             encoded_passages: encoded,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Cold build with a cache: write text to the new snapshot while files are
+    /// read, embed each batch from its heap text, then replace that text with
+    /// the mapping. This avoids writing all text, reading it back for
+    /// embedding, and holding the full text on the heap at once.
+    fn build_streamed(
+        &self,
+        old: &Snapshot,
+        target: &HashSet<PathBuf>,
+        selected: &[PathBuf],
+        progress: Option<&BuildProgress>,
+        started: Instant,
+    ) -> Result<UpdateStats> {
+        let model = match self.choice {
+            ModelChoice::Text => self.models.get(&TEXT)?,
+            _ => self.models.get(&CODE)?,
+        };
+        let base = self
+            .cache
+            .as_deref()
+            .ok_or("streamed build requires a cache path")?;
+        let generation = old.generation + 1;
+        let dest = snapshot_version_path(base, generation);
+        let name = dest
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("snapshot");
+        let sequence = SNAPSHOT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dest.with_file_name(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+        let vec_tmp =
+            dest.with_file_name(format!(".{name}.{}.{sequence}.vec.tmp", std::process::id()));
+        let header_len = snapshot_header_len(&self.root, &model)?;
+        let text_base = header_len;
+        // Let glibc return this build's short-lived text pages to the OS; the
+        // default is restored before any query runs.
+        tune_allocator();
+
+        let build = (|| -> Result<Snapshot> {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(&tmp)?;
+            file.set_len(header_len as u64)?;
+            let vec_file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(&vec_tmp)?;
+            let mut vec_writer = BufWriter::new(&vec_file);
+            let mut files: HashMap<PathBuf, Arc<FileData>> = HashMap::new();
+            let mut interner = TermInterner::new();
+            let mut text_len = 0usize;
+            let mut vector_bytes = 0u64;
+            let timings = BuildTimings::default();
+            if let Some(progress) = progress {
+                progress.set_stage(STAGE_READ);
+                progress.set_files(0, selected.len());
+                progress.set_chunks(0);
+            }
+            for batch in selected.chunks(256) {
+                let prepared =
+                    parallel_map(batch, |rel| {
+                        prepare_file(&self.root, rel, &old.files, &timings)
+                    });
+                let mut pending: Vec<StreamFile> = Vec::new();
+                for item in prepared {
+                    match item? {
+                        PreparedFile::Removed(_) | PreparedFile::Unchanged => {}
+                        PreparedFile::Empty(rel, digest) => {
+                            files.insert(
+                                rel,
+                                Arc::new(FileData {
+                                    digest,
+                                    chunks: Vec::new(),
+                                    vectors: Vec::new(),
+                                    lexical: FileLexical::default(),
+                                }),
+                            );
+                        }
+                        PreparedFile::Rebuilt(rel, digest, chunks, raw, _) => {
+                            let lexical = interner.intern_file(raw);
+                            pending.push(StreamFile {
+                                rel,
+                                digest,
+                                lexical,
+                                chunks: chunks.into_iter().map(|chunk| (chunk, 0)).collect(),
+                            });
+                        }
+                    }
+                }
+                let batch_start = text_base
+                    .checked_add(text_len)
+                    .ok_or("snapshot text section overflows")?;
+                {
+                    file.seek(std::io::SeekFrom::Start(batch_start as u64))?;
+                    let mut writer = BufWriter::new(&file);
+                    for item in &pending {
+                        for (chunk, _) in &item.chunks {
+                            writer.write_all(chunk.content.as_str().as_bytes())?;
+                        }
+                    }
+                    writer.flush()?;
+                }
+                let mut at = batch_start;
+                for item in &mut pending {
+                    for (chunk, offset) in &mut item.chunks {
+                        *offset = at;
+                        at = at
+                            .checked_add(chunk.content.as_str().len())
+                            .ok_or("snapshot text section overflows")?;
+                    }
+                }
+                text_len = at - text_base;
+                let mut texts: Vec<String> = Vec::with_capacity(512);
+                for item in &pending {
+                    for (chunk, _) in &item.chunks {
+                        texts.push(format!("{}\n{}", chunk.path, chunk.content));
+                        if texts.len() == 512 {
+                            flush_embed_batch(
+                                &model,
+                                &mut vec_writer,
+                                &mut texts,
+                                &mut vector_bytes,
+                                progress,
+                            )?;
+                        }
+                    }
+                }
+                flush_embed_batch(
+                    &model,
+                    &mut vec_writer,
+                    &mut texts,
+                    &mut vector_bytes,
+                    progress,
+                )?;
+                let batch_end = text_base
+                    .checked_add(text_len)
+                    .ok_or("snapshot text section overflows")?;
+                let map_start = align_down(batch_start, 64 * 1024);
+                let map = if batch_end > batch_start {
+                    Some(Arc::new(unsafe {
+                        MmapOptions::new()
+                            .offset(map_start as u64)
+                            .len(batch_end - map_start)
+                            .map(&file)?
+                    }))
+                } else {
+                    None
+                };
+                for item in pending {
+                    let mut fresh = Vec::with_capacity(item.chunks.len());
+                    for (chunk, absolute) in item.chunks {
+                        let len = chunk.content.as_str().len();
+                        let content = match &map {
+                            Some(map) => crate::ChunkText::mapped_trusted(
+                                map.clone(),
+                                absolute - map_start,
+                                len,
+                            )?,
+                            None => crate::ChunkText::from(String::new()),
+                        };
+                        fresh.push(Arc::new(Chunk {
+                            path: chunk.path.clone(),
+                            start: chunk.start,
+                            end: chunk.end,
+                            content,
+                            counts: HashMap::new(),
+                            scores: None,
+                        }));
+                    }
+                    files.insert(
+                        item.rel,
+                        Arc::new(FileData {
+                            digest: item.digest,
+                            chunks: fresh,
+                            vectors: Vec::new(),
+                            lexical: item.lexical,
+                        }),
+                    );
+                }
+                if let Some(progress) = progress {
+                    progress.add_files(batch.len());
+                    progress.set_chunks(files.values().map(|data| data.chunks.len()).sum());
+                }
+            }
+            vec_writer.flush()?;
+            let total_chunks: usize = files.values().map(|data| data.chunks.len()).sum();
+            if vector_bytes != total_chunks as u64 * 256 * 4 {
+                return Err("streamed vector count mismatch".into());
+            }
+            let mut ordered: Vec<PathBuf> = files.keys().cloned().collect();
+            ordered.sort_unstable_by(|a, b| {
+                a.as_os_str()
+                    .as_encoded_bytes()
+                    .cmp(b.as_os_str().as_encoded_bytes())
+            });
+            let (meta, meta_text_len, total_chunks) =
+                build_snapshot_metadata(&ordered, &files)?;
+            if meta_text_len != text_len {
+                return Err("streamed text length mismatch".into());
+            }
+            let meta_base = text_base
+                .checked_add(text_len)
+                .ok_or("snapshot text section overflows")?;
+            let vector_base = (meta_base + meta.len() + 3) & !3;
+            file.seek(std::io::SeekFrom::Start(meta_base as u64))?;
+            file.write_all(&meta)?;
+            drop(vec_writer);
+            let expected_vectors = total_chunks as u64 * 256 * 4;
+            if vec_file.metadata()?.len() != expected_vectors {
+                return Err("streamed vector scratch mismatch".into());
+            }
+            let mut source = BufReader::new(File::open(&vec_tmp)?);
+            file.seek(std::io::SeekFrom::Start(vector_base as u64))?;
+            let mut writer = BufWriter::new(&file);
+            let copied = std::io::copy(&mut source, &mut writer)?;
+            writer.flush()?;
+            drop(writer);
+            if copied != expected_vectors {
+                return Err("streamed vector copy mismatch".into());
+            }
+            let header = snapshot_header(
+                &self.root,
+                &model,
+                generation,
+                files.len(),
+                total_chunks,
+                meta.len(),
+                text_base,
+                text_len,
+                meta_base,
+                vector_base,
+            )?;
+            file.seek(std::io::SeekFrom::Start(0))?;
+            file.write_all(&header)?;
+            file.sync_all()?;
+            if file.metadata()?.len() != vector_base as u64 + expected_vectors {
+                return Err("streamed snapshot length mismatch".into());
+            }
+            if dest.exists() {
+                let _ = std::fs::remove_file(&dest);
+            }
+            std::fs::rename(&tmp, &dest)?;
+            let full = Arc::new(unsafe { Mmap::map(&File::open(&dest)?)? });
+            let mut chunks: Vec<Arc<Chunk>> = Vec::with_capacity(total_chunks);
+            let mut spans: Vec<(PathBuf, usize, usize)> = Vec::with_capacity(ordered.len());
+            for rel in &ordered {
+                let data = &files[rel];
+                let start = chunks.len();
+                chunks.extend(data.chunks.iter().cloned());
+                spans.push((rel.clone(), start, chunks.len() - start));
+            }
+            let vectors: Vec<VectorRef> = (0..total_chunks)
+                .map(|i| VectorRef::Mapped {
+                    map: full.clone(),
+                    offset: vector_base + i * 256 * 4,
+                })
+                .collect();
+            for (rel, start, len) in spans {
+                let data = files.get(&rel).unwrap().clone();
+                files.insert(
+                    rel,
+                    Arc::new(FileData {
+                        digest: data.digest,
+                        chunks: chunks[start..start + len].to_vec(),
+                        vectors: vectors[start..start + len].to_vec(),
+                        lexical: data.lexical.clone(),
+                    }),
+                );
+            }
+            let lexical = build_lexical(interner.lookup, &files, &ordered, chunks.len());
+            for rel in target {
+                match (files.get(rel), std::fs::read(self.root.join(rel))) {
+                    (Some(data), Ok(bytes)) if Sha256::digest(&bytes).as_slice() == data.digest => {}
+                    (None, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => {
+                        return Err(
+                            "source changed while preparing live index; retry refresh".into(),
+                        )
+                    }
+                }
+            }
+            let (_, current) = crate::source_files(&self.root)?;
+            let current: HashSet<_> = current.iter().map(|p| normalize(p)).collect();
+            if &current != target {
+                return Err(
+                    "source membership changed while preparing live index; retry refresh".into(),
+                );
+            }
+            Ok(Snapshot {
+                files,
+                chunks,
+                vectors,
+                lexical: Arc::new(lexical),
+                model: model.clone(),
+                generation,
+            })
+        })();
+        restore_allocator();
+
+        let next = match build {
+            Ok(next) => next,
+            Err(error) => {
+                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(&vec_tmp);
+                return Err(error);
+            }
+        };
+        let files = next.files.len();
+        let chunks = next.chunks.len();
+        *self
+            .snapshot
+            .write()
+            .map_err(|_| "live index snapshot poisoned")? = Arc::new(next);
+        self.cache_ready.store(true, Ordering::Relaxed);
+        prune_snapshot_versions(base, &dest);
+        trim_allocator();
+        let _ = std::fs::remove_file(&vec_tmp);
+        Ok(UpdateStats {
+            changed_files: files,
+            encoded_passages: chunks,
             elapsed_ms: started.elapsed().as_millis() as u64,
         })
     }
@@ -2884,6 +3346,47 @@ mod tests {
         assert_eq!(report.mapped_texts as usize, report.chunks);
         for (i, rel) in ["a.rs", "b.rs"].iter().enumerate() {
             assert_eq!(rows(&second, rel), expected[i]);
+        }
+    }
+
+    #[test]
+    fn streamed_cold_build_matches_the_heap_path_exactly() {
+        let (_dir, root) = fixture();
+        let mut body = String::new();
+        for i in 0..300 {
+            body.push_str(&format!(
+                "fn streamed_helper_{i}() {{ let value_{i} = {i}; }}\n"
+            ));
+        }
+        std::fs::write(root.join("notes.txt"), body).unwrap();
+        let (_cache_dir, cache) = cache_place();
+        let streamed = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache),
+        )
+        .unwrap();
+        let heap = LiveIndex::open(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+        )
+        .unwrap();
+        assert_eq!(streamed.memory_report().heap_texts, 0);
+        assert!(heap.memory_report().heap_texts > 0);
+        for query in [
+            "useful value",
+            "streamed_helper_17",
+            "other value",
+            "notes txt filler",
+            "renamed symbol",
+        ] {
+            assert_eq!(
+                serde_json::to_value(streamed.query(query, 10, true).unwrap()).unwrap(),
+                serde_json::to_value(heap.query(query, 10, true).unwrap()).unwrap(),
+                "query {query:?} differs"
+            );
         }
     }
 
