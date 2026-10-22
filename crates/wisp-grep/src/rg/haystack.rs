@@ -144,6 +144,19 @@ impl Haystack {
         }
     }
 
+    /// wgrep: true when this haystack came from an index candidate, not from
+    /// the walker (and therefore was not supplied explicitly by the user).
+    pub(crate) fn is_indexed(&self) -> bool {
+        matches!(self.source, Source::Indexed(_))
+    }
+
+    /// wgrep: a candidate that vanished before it could be searched. A walk
+    /// would simply not yield it, so the search skips it silently. Explicit
+    /// paths keep their normal error because they are never `Indexed`.
+    pub(crate) fn missing_indexed(&self, err: &std::io::Error) -> bool {
+        self.is_indexed() && err.kind() == std::io::ErrorKind::NotFound
+    }
+
     /// Returns true if and only if this entry corresponds to stdin.
     pub(crate) fn is_stdin(&self) -> bool {
         self.dent().is_some_and(|dent| dent.is_stdin())
@@ -189,5 +202,36 @@ impl Haystack {
     /// Returns true if and only if this haystack points to a file.
     fn is_file(&self) -> bool {
         self.dent().and_then(|dent| dent.file_type()).map_or(false, |ft| ft.is_file())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_index_candidate_is_skipped_silently() {
+        let gone = HaystackBuilder::new().build_indexed(std::path::PathBuf::from("gone.rs"));
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(gone.missing_indexed(&missing));
+        // Other errors still reach ripgrep's error path.
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!gone.missing_indexed(&denied));
+    }
+
+    #[test]
+    fn an_explicit_walked_file_keeps_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("present.rs");
+        std::fs::write(&file, "fn present() {}\n").unwrap();
+        let dent = ignore::WalkBuilder::new(dir.path())
+            .build()
+            .flatten()
+            .find(|dent| dent.file_type().is_some_and(|kind| kind.is_file()))
+            .unwrap();
+        let walked = HaystackBuilder::new().build_from_result(Ok(dent)).unwrap();
+        assert!(!walked.is_indexed());
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(!walked.missing_indexed(&missing));
     }
 }

@@ -1519,7 +1519,40 @@ pub(crate) fn event_loop(
         // Visibility-related events still need a full walk (later
         // incremental phases); flagging now subsumes any scoped work
         // for the rest of the batch.
-        let mut full: Option<WalkCause> = None;
+        //
+        // FSEvents reports a rename as Modify(Name(Any)) without a From/To
+        // pair, and it may name only the new path. If every path in the batch
+        // still exists, only the new side was reported, so walk to drop the
+        // unknown old path. A missing path accounts for the source side,
+        // whether or not it was known: an atomic save names a missing temp
+        // file plus the existing target, and needs no walk.
+        let mut unpaired_rename = false;
+        let mut source_reported = false;
+        {
+            for work in &batch {
+                let Ok(event) = work.event() else { continue };
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(notify::event::ModifyKind::Name(
+                        notify::event::RenameMode::Any
+                    ))
+                ) {
+                    continue;
+                }
+                unpaired_rename = true;
+                for path in &event.paths {
+                    if skipped.contains(path) {
+                        continue;
+                    }
+                    let missing = stats.get(path).is_some_and(|stat| {
+                        matches!(&stat.md, Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+                    });
+                    source_reported |= missing;
+                }
+            }
+        }
+        let mut full: Option<WalkCause> = (unpaired_rename && !source_reported)
+            .then_some(WalkCause::Scoped);
         for work in &batch { let event = work.event();
             if let Some(cause) = State::full_cause(event, &root, &skipped) {
                 full = Some(cause);
@@ -2061,6 +2094,149 @@ mod tests {
             reconciling: Arc::new(AtomicBool::new(false)),
             missed: Arc::new(AtomicBool::new(false)),
             unprunable: false,
+        }
+    }
+
+    /// A running text event loop for tests that need to feed real events.
+    struct EventHarness {
+        state: Arc<RwLock<State>>,
+        pending: Arc<PendingSet>,
+        ingress: watch_budget::Ingress,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl EventHarness {
+        fn new(root: &Path, index: Arc<Index>) -> EventHarness {
+            let state = Arc::new(RwLock::new(state_for(root, index)));
+            let (ingress, rx, health) = watch_budget::bounded_with_limits(64, 4096, 1 << 20);
+            let pending = Arc::new(PendingSet::with_health(&health));
+            let worker = {
+                let (state, pending, health, root) =
+                    (state.clone(), pending.clone(), health.clone(), root.to_path_buf());
+                std::thread::spawn(move || event_loop(state, pending, health, root, rx))
+            };
+            EventHarness { state, pending, ingress, worker: Some(worker) }
+        }
+
+        fn stop(mut self) {
+            drop(self.ingress);
+            if let Some(worker) = self.worker.take() {
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "event was not applied in time");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn unpaired_rename_drops_a_removed_indexed_file() {
+        let f = fixture();
+        let path = f.root.join("visible.txt");
+        let index = one_file_index(&f.root, "visible.txt");
+        std::fs::remove_file(&path).unwrap();
+        let harness = EventHarness::new(&f.root, index);
+        harness.ingress.try_ingest(Ok(notify::Event::new(EventKind::Modify(
+            notify::event::ModifyKind::Name(notify::event::RenameMode::Any),
+        ))
+        .add_path(path)));
+        let state = harness.state.clone();
+        wait_until(|| !state.read().unwrap().ids[0].seen);
+        harness.stop();
+
+        let pending = PendingSet::new_with_bound(Duration::from_millis(50));
+        let got = answer(&state, &pending, &test_health(), &plan::Query::All, "").unwrap();
+        match got {
+            Answered::Candidates(ans, _, _) => {
+                assert_eq!(ans.total, 0, "the removed file is still a candidate")
+            }
+            Answered::PendingTimeout => panic!("a settled state must not decline"),
+        }
+    }
+
+    #[test]
+    fn unpaired_rename_with_only_the_new_path_walks_out_the_old_one() {
+        let f = fixture();
+        let index = one_file_index(&f.root, "a.rs");
+        std::fs::write(f.root.join("a.rs"), "hello\n").unwrap();
+        std::fs::rename(f.root.join("a.rs"), f.root.join("b.rs")).unwrap();
+        let harness = EventHarness::new(&f.root, index);
+        // FSEvents can name only the new side of the rename.
+        harness.ingress.try_ingest(Ok(notify::Event::new(EventKind::Modify(
+            notify::event::ModifyKind::Name(notify::event::RenameMode::Any),
+        ))
+        .add_path(f.root.join("b.rs"))));
+        let state = harness.state.clone();
+        wait_until(|| state.read().unwrap().needs_rescan);
+        harness.stop();
+
+        let pending = PendingSet::new_with_bound(Duration::from_millis(50));
+        let got = answer(&state, &pending, &test_health(), &plan::Query::All, "").unwrap();
+        match got {
+            Answered::Candidates(ans, _, _) => {
+                let vanished = ans.hits.iter().any(|hit| match hit {
+                    Hit::Id(id) => std::str::from_utf8(ans.index.path(*id as usize))
+                        .is_ok_and(|rel| rel == "a.rs"),
+                    Hit::Added(rel) => rel == "a.rs",
+                });
+                assert!(
+                    !vanished,
+                    "the vanished old path is still a candidate: {:?}",
+                    ans.total
+                );
+                assert!(
+                    ans.hits
+                        .iter()
+                        .any(|hit| matches!(hit, Hit::Added(rel) if rel == "b.rs")),
+                    "the new path is missing from the candidates"
+                );
+            }
+            Answered::PendingTimeout => panic!("a settled state must not decline"),
+        }
+    }
+
+    #[test]
+    fn atomic_save_with_missing_temp_and_existing_target_does_not_walk() {
+        let f = fixture();
+        let target = f.root.join("target.rs");
+        std::fs::write(&target, "fn saved() {}\n").unwrap();
+        let index = one_file_index(&f.root, "target.rs");
+        let temp = f.root.join(".target.rs.tmp");
+        let harness = EventHarness::new(&f.root, index);
+        harness.ingress.try_ingest(Ok(notify::Event::new(EventKind::Modify(
+            notify::event::ModifyKind::Name(notify::event::RenameMode::Any),
+        ))
+        .add_path(temp)
+        .add_path(target)));
+        let state = harness.state.clone();
+        wait_until(|| {
+            let state = state.read().unwrap();
+            state.needs_rescan || state.dirty > 0
+        });
+        {
+            let state = state.read().unwrap();
+            assert!(!state.needs_rescan, "an atomic save must not force a full walk");
+            assert_eq!(state.walks.scoped, 0, "the save must stay scoped");
+        }
+        harness.stop();
+
+        let pending = PendingSet::new_with_bound(Duration::from_millis(50));
+        let got = answer(&state, &pending, &test_health(), &plan::Query::All, "").unwrap();
+        match got {
+            Answered::Candidates(ans, _, _) => {
+                let present = ans.hits.iter().any(|hit| match hit {
+                    Hit::Id(id) => std::str::from_utf8(ans.index.path(*id as usize))
+                        .is_ok_and(|rel| rel == "target.rs"),
+                    Hit::Added(rel) => rel == "target.rs",
+                });
+                assert!(present, "the saved target is not a candidate");
+            }
+            Answered::PendingTimeout => panic!("a settled state must not decline"),
         }
     }
 

@@ -332,8 +332,7 @@ fn fresh_repo_counts_every_file_in_the_text_status() {
         status.args(["status", "--json"]);
         let status = run_bounded(status, 60);
         assert!(status.status.success());
-        let value: serde_json::Value =
-            serde_json::from_slice(&status.stdout).expect("status json");
+        let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
         let text = &value["roots"][0]["text"];
         assert_eq!(
             text["files"].as_u64(),
@@ -360,11 +359,7 @@ fn fresh_repo_reports_unindexable_files_without_staying_building() {
     scratch.write("src/a.rs", "fn alpha() { let needle = 1; }\n");
     scratch.write("src/b.rs", "fn beta() { let other = 2; }\n");
     // The builder never indexes a UTF-16 BOM file, because rg transcodes it.
-    std::fs::write(
-        scratch.root.join("bom.rs"),
-        [0xFF, 0xFE, b'f', 0, b'n', 0],
-    )
-    .unwrap();
+    std::fs::write(scratch.root.join("bom.rs"), [0xFF, 0xFE, b'f', 0, b'n', 0]).unwrap();
 
     let _daemon = Daemon::start(&scratch, &[]);
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -373,8 +368,7 @@ fn fresh_repo_reports_unindexable_files_without_staying_building() {
         status.args(["status", "--json"]);
         let status = run_bounded(status, 60);
         assert!(status.status.success());
-        let value: serde_json::Value =
-            serde_json::from_slice(&status.stdout).expect("status json");
+        let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
         let text = &value["roots"][0]["text"];
         assert_eq!(text["files"].as_u64(), Some(3), "wrong total: {text}");
         if text["indexed"].as_u64() == Some(2)

@@ -307,6 +307,9 @@ fn search(
             Ok(search_result) => search_result,
             // A broken pipe means graceful termination.
             Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
+            // An index candidate that vanished before the search is a normal
+            // walk miss, not an rg error.
+            Err(err) if haystack.missing_indexed(&err) => continue,
             Err(err) => {
                 err_message!("{}: {}", haystack.path().display(), err);
                 continue;
@@ -370,6 +373,9 @@ fn search_parallel(
         searcher.printer().get_mut().clear();
         let search_result = match searcher.search(&haystack) {
             Ok(search_result) => search_result,
+            // An index candidate that vanished before the search is a normal
+            // walk miss, not an rg error.
+            Err(err) if haystack.missing_indexed(&err) => return WalkState::Continue,
             Err(err) => {
                 err_message!("{}: {}", haystack.path().display(), err);
                 return WalkState::Continue;
