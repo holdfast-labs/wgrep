@@ -208,6 +208,68 @@ fn refresh_batch(
         }
     }
 }
+/// Test-only fault injection: a build fails while the marker file named by
+/// `WG_TEST_FAIL_BUILD` exists. Tests use it to prove that one `up` retries a
+/// failed build. Normal use never sets the variable.
+#[cfg(debug_assertions)]
+fn injected_build_failure() -> Result<()> {
+    let Some(marker) = std::env::var_os("WG_TEST_FAIL_BUILD") else {
+        return Ok(());
+    };
+    if Path::new(&marker).exists() {
+        let tag = std::fs::read_to_string(&marker).unwrap_or_default();
+        return Err(format!("test-only build failure: {}", tag.trim()).into());
+    }
+    Ok(())
+}
+#[cfg(not(debug_assertions))]
+fn injected_build_failure() -> Result<()> {
+    Ok(())
+}
+/// Display form of a path. On Windows it drops the verbatim prefix. Never use
+/// the result to open a file.
+fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return rest.to_owned();
+        }
+    }
+    text
+}
+fn model_name(choice: ModelChoice) -> &'static str {
+    match choice {
+        ModelChoice::Auto => "auto",
+        ModelChoice::Code => "code",
+        ModelChoice::Text => "text",
+    }
+}
+fn attached_model_name(revision: &str) -> &'static str {
+    if revision == wgrep::CODE.revision {
+        "code"
+    } else if revision == wgrep::TEXT.revision {
+        "text"
+    } else {
+        "unknown"
+    }
+}
+const NO_SERVICE: &str = "no wg service is running for this cache; run wg up first";
+/// True when the error means that no daemon owns this cache: the metadata file
+/// is absent or the recorded listener refuses the connection.
+fn daemon_unavailable(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+        )
+    })
+}
 fn read_frame(stream: &TcpStream, cap: usize) -> Result<Vec<u8>> {
     read_frame_timeout(stream, cap, FRAME_TIMEOUT)
 }
@@ -427,9 +489,10 @@ fn attach(
     progress: Option<Arc<BuildProgress>>,
 ) -> Result<(RootStatus, u64, u64)> {
     let _admission = service.admission.lock().unwrap();
+    injected_build_failure()?;
     let path = root_key(path);
     if !path.is_dir() {
-        return Err(format!("not a directory: {}", path.display()).into());
+        return Err(format!("not a directory: {}", display_path(&path)).into());
     }
     let existing = {
         service
@@ -786,19 +849,22 @@ fn start_up(
 ) -> Result<serde_json::Value> {
     let path = root_key(path);
     if !path.is_dir() {
-        return Err(format!("not a directory: {}", path.display()).into());
+        return Err(format!("not a directory: {}", display_path(&path)).into());
     }
     {
         let state = service.state.lock().unwrap();
         if let Some(root) = state.roots.get(&path) {
             if root.model != choice {
-                return Err(
-                    "root is already attached with a different model; restart service to change it"
-                        .into(),
-                );
+                return Err(format!(
+                    "root is already attached with model {}; run wg down, then wg up --model {} to change it",
+                    model_name(root.model),
+                    model_name(choice)
+                )
+                .into());
             }
             return Ok(serde_json::json!({
                 "ok": true,
+                "pid": std::process::id(),
                 "building": false,
                 "root": serde_json::to_value(root_status(&path, root))?,
             }));
@@ -806,18 +872,19 @@ fn start_up(
     }
     let mut building = service.building.lock().unwrap();
     if let Some(existing) = building.get(&path).cloned() {
-        let error = existing.error.lock().unwrap().clone();
-        if let Some(error) = error {
-            // A finished failed build: drop it so this up can retry.
+        if existing.error.lock().unwrap().is_some() {
+            // A finished failed build: drop it and start a fresh build in this
+            // same call, so one `up` retries instead of only clearing the
+            // error. The new build reports its own error if it fails too.
             building.remove(&path);
-            drop(building);
-            return Err(error.into());
+        } else {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "pid": std::process::id(),
+                "building": true,
+                "root": existing.status(),
+            }));
         }
-        return Ok(serde_json::json!({
-            "ok": true,
-            "building": true,
-            "root": existing.status(),
-        }));
     }
     if building.len() >= MAX_ROOTS {
         return Err("service root limit reached".into());
@@ -849,6 +916,7 @@ fn start_up(
         })?;
     Ok(serde_json::json!({
         "ok": true,
+        "pid": std::process::id(),
         "building": true,
         "root": build.status(),
     }))
@@ -967,7 +1035,13 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 if (requested_model == ModelChoice::Code && revision != wgrep::CODE.revision)
                     || (requested_model == ModelChoice::Text && revision != wgrep::TEXT.revision)
                 {
-                    return Err("query model differs from attached root model; use the model selected by wg up".into());
+                    let requested = model_name(requested_model);
+                    return Err(format!(
+                        "query model {requested} does not match the attached root model {} (root attached with {}); run wg down, then wg up --model {requested} to change it",
+                        attached_model_name(&revision),
+                        model_name(r.model)
+                    )
+                    .into());
                 }
                 (root, r.index.clone(), r.pending.clone(), r.lost.clone())
             };
@@ -1120,8 +1194,13 @@ pub fn ensure_running(cache: Option<PathBuf>) -> Result<()> {
 /// daemon keeps building, and a later `up` or `status` sees the same build.
 pub fn up(path: &Path, model: &str, cache: Option<PathBuf>) -> Result<serde_json::Value> {
     let start = Instant::now();
-    ensure_running(cache)?;
+    // Check the root before the daemon starts. A typo must not leave an empty
+    // daemon behind, and no build can succeed for a missing path.
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {}", display_path(&canonical)).into());
+    }
+    ensure_running(cache)?;
     let mut reply = request_timeout(
         serde_json::json!({"op":"up","path":path,"model":model}),
         Duration::from_secs(30),
@@ -1220,10 +1299,23 @@ pub fn text_groups(plan: &TextPlan) -> std::result::Result<Vec<TextGroup>, Strin
 }
 
 pub fn status_json() -> Result<serde_json::Value> {
-    request(serde_json::json!({"op":"status"}))
+    request(serde_json::json!({"op":"status"})).map_err(|error| {
+        if daemon_unavailable(error.as_ref()) {
+            NO_SERVICE.into()
+        } else {
+            error
+        }
+    })
 }
 pub fn down() -> Result<serde_json::Value> {
-    request(serde_json::json!({"op":"down"}))
+    match request(serde_json::json!({"op":"down"})) {
+        Ok(value) => Ok(value),
+        // Stopping an already stopped daemon is not an error.
+        Err(error) if daemon_unavailable(error.as_ref()) => {
+            Ok(serde_json::json!({"ok":true,"running":false}))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

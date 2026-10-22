@@ -123,7 +123,10 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
             } else {
                 let root = &r["root"];
                 println!("Ready: {} files, {} chunks", root["files"], root["chunks"]);
-                println!("Root: {}", root["path"].as_str().unwrap_or("?"));
+                println!(
+                    "Root: {}",
+                    display_path(root["path"].as_str().unwrap_or("?"))
+                );
                 println!(
                     "Build: {:.2}s | Model setup: {:.2}s | Total: {:.2}s | PID: {}",
                     r["build_ms"].as_u64().unwrap_or(0) as f64 / 1000.0,
@@ -170,7 +173,7 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                     };
                     println!(
                         "{} [{}]: {} files, {} chunks, generation {}",
-                        root["path"].as_str().unwrap_or("?"),
+                        display_path(root["path"].as_str().unwrap_or("?")),
                         state,
                         root["files"],
                         root["chunks"],
@@ -200,7 +203,11 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                 return Err("wg down takes no arguments".into());
             }
             let r = service::down()?;
-            println!("Stopped wg service (pid {}).", r["pid"]);
+            if r["running"] == false {
+                println!("No wg service is running.");
+            } else {
+                println!("Stopped wg service (pid {}).", r["pid"]);
+            }
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(format!("unknown subcommand {name}").into()),
@@ -261,4 +268,18 @@ fn repository_root() -> Result<PathBuf> {
         .to_path_buf();
     root.to_str().ok_or("wg requires UTF-8 paths")?;
     Ok(root)
+}
+
+/// Human-readable path. On Windows it drops the verbatim prefix. This is for
+/// display only; file access always uses the original path.
+#[cfg(windows)]
+fn display_path(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_owned()
+}
+#[cfg(not(windows))]
+fn display_path(value: &str) -> String {
+    value.to_owned()
 }
