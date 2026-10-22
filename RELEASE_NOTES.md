@@ -62,6 +62,22 @@ runs use the cache. The text route does not need the model or `rg`.
 On Windows, PowerShell may show the `wg up` progress line in red. It is progress
 output, not an error.
 
+## Service commands
+
+- `wg up --json` includes `pid` in every reply: a new build, a joined build, and
+  an already attached root.
+- `wg up` checks the path before it starts the daemon. A missing path or a file
+  fails with `not a directory`.
+- `wg down` is idempotent. With no daemon it exits 0 and prints
+  `No wg service is running.` The JSON reply is `{"ok":true,"running":false}`.
+- `wg status` with no daemon exits 2 and prints
+  `wg: no wg service is running for this cache; run wg up first`.
+- The model is fixed at `wg up`. A mismatch error names the attached model and
+  says: run `wg down`, then `wg up --model <m>`.
+- On Windows, human-readable output removes the `\\?\` prefix from paths. JSON
+  keeps the canonical path.
+- A failed build is retried by the next single `wg up`.
+
 ## Supported platforms
 
 - Linux x64

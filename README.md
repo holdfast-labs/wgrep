@@ -75,6 +75,13 @@ time, model setup time, total time, daemon PID, and text index size. In a
 terminal it shows a spinner and elapsed time on stderr. With `--json` it prints
 one JSON object and no progress text.
 
+`wg up` checks the path before it starts the daemon. A missing path, or a path
+that is not a directory, fails with `not a directory` and exit 2. No daemon
+starts. A file is not a valid root.
+
+The `--json` object includes `pid`, the daemon PID, in every case: a new build,
+a joined build, and an already attached root.
+
 The daemon builds asynchronously. The `wg up` client polls status with short
 requests. Ctrl-C stops only the client. The daemon keeps building, and a later
 `wg up` or `wg status` shows the same build.
@@ -182,7 +189,9 @@ wg "packet framing" --json --explain --top 5
 - `--explain` adds score fields and requires `--json`.
 - `--model auto|code|text` selects the embedding policy. `auto` is the default.
   A query that names `code` or `text` must match the model used by `wg up`.
-  `auto` does not enforce a model.
+  `auto` does not enforce a model. The model is fixed at `wg up`. A mismatch
+  fails, names the attached model, and gives the fix: run `wg down`, then
+  `wg up --model <model>`.
 
 Semantic search is ranked, not exhaustive. `wg` fuses a lexical candidate set
 and a semantic candidate set, then returns a ranked shortlist. A correct answer
@@ -245,11 +254,16 @@ wg down
 ```
 
 `wg status` shows every attached root, its counts, and its health.
-`wg status --json` is machine-readable.
+`wg status --json` is machine-readable. With no daemon, `wg status` exits 2 and
+prints `wg: no wg service is running for this cache; run wg up first`.
 
 `wg down` stops the shared daemon. It stops search for every attached root, not
 only the current one. After you stop it, run `wg up` again for the roots you
-want.
+want. `wg down` is idempotent. With no daemon it exits 0 and prints
+`No wg service is running.` The JSON reply is `{"ok":true,"running":false}`.
+
+On Windows, human-readable `wg up` and `wg status` output removes the `\\?\`
+prefix from paths. JSON keeps the canonical path, which can keep the prefix.
 
 ## Freshness
 
@@ -271,7 +285,8 @@ fallback changes speed, not results.
 *No restart. The edit is searchable before the next prompt returns.*
 
 To recover an unhealthy root, run `wg down` and then `wg up`. `wg status` shows
-the error and the recovery hint.
+the error and the recovery hint. If a build fails, the next single `wg up`
+retries it in the same call. That reply reports the new result or the new error.
 
 ## Platform support
 

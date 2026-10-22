@@ -42,13 +42,30 @@ The service listens on `127.0.0.1` with an ephemeral port. A private
 `service.json` file holds the port and a random token. Requests and replies are
 one JSON line. The frame cap is 16 MiB, and a frame has a 90-second deadline.
 
+`wg up` checks the root path before it starts the daemon. A missing path, or a
+path that is not a directory, returns `not a directory` and starts nothing. A
+file is not a valid root.
+
 `wg up` does not hold one long request open. It sends a short `up` request. The
-daemon starts a build thread and replies at once. The client polls `status`
-every 200 ms with a 30-second frame bound. Total wall time is not bounded.
+daemon starts a build thread and replies at once. The immediate reply carries
+the daemon `pid`. Every later `wg up` reply carries it too, for a joined build
+or an already attached root. The client polls `status` every 200 ms with a
+30-second frame bound. Total wall time is not bounded.
 
 `status` shows roots, build stages, counts, and text index state. A building
 root has `ready: false` and `building: true`. A finished failure keeps `error`
-set. `down` stops the daemon for every attached root.
+set. The next single `wg up` removes that failed entry and starts a fresh build
+in the same call. If that build fails too, the call returns the new error.
+
+A model mismatch error names the attached model and says to run `wg down`, then
+`wg up --model <m>`. The model is fixed at `wg up`.
+
+`down` stops the daemon for every attached root. It is idempotent: with no
+daemon it returns success. `status` with no daemon exits 2 with
+`no wg service is running for this cache; run wg up first`.
+
+Human-readable output removes the Windows `\\?\` prefix from paths. JSON and
+file access keep the canonical path.
 
 ### Detached start
 

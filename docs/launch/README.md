@@ -256,7 +256,7 @@ square charts.
 ## Honest caveats
 
 - The clips use cached model and parser assets. `HF_HUB_OFFLINE=1` is the
-  default. A cold cache can download about 33.5 MB on the first run. The
+  default. A cold cache can download about 58 MB in total on the first run. The
   corpus contains Python files, so the Python parser must be cached. If it is
   not, run once with `HF_HUB_OFFLINE=0`.
 - The `wg up` index build is hidden. The tapes wait for the `wg up` PID line

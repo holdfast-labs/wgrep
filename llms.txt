@@ -58,4 +58,17 @@ assets. No `rg` binary is needed. Release archives ship only the `wg` binary.
   `pending: 0`, and `text` not null or `text_error` a string.
 - `wg up` is safe under captured output. The daemon is detached and inherits
   only its log.
+- `wg up --json` always includes `pid`, the daemon PID. This holds for a new
+  build, a joined build, and an already attached root.
+- `wg up` checks the path before it starts the daemon. A missing path or a file
+  fails with `not a directory`.
+- `wg down` is idempotent. With no daemon it exits 0 and prints
+  `No wg service is running.` The JSON reply is `{"ok":true,"running":false}`.
+- `wg status` with no daemon exits 2 and prints
+  `wg: no wg service is running for this cache; run wg up first`.
+- The model is fixed at `wg up`. A mismatch error names the attached model and
+  says: run `wg down`, then `wg up --model <m>`.
+- On Windows, human-readable output removes the `\\?\` prefix from paths. JSON
+  keeps the canonical path.
+- A failed build is retried by the next single `wg up`.
 - Exit codes: 0 matches or success, 1 no matches, 2 error.

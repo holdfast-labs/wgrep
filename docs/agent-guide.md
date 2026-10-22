@@ -52,6 +52,10 @@ Without a path, `wg up` uses the nearest `.git` ancestor, or the current
 directory. It attaches the root to the shared daemon and returns when search is
 ready. A later `wg up` in the same root returns fast and reuses the daemon.
 
+`wg up` checks the path first. A missing path, or a path that is not a
+directory, fails with `not a directory` and exit 2. No daemon starts. A file is
+not a valid root.
+
 `wg up` is safe under captured output. On Windows, the daemon is detached with
 an explicit handle list and inherits only the log file. A piped or CI-run
 `wg up` returns and releases its pipes. It does not hang the harness.
@@ -83,6 +87,7 @@ same build.
 ```text
 {
   "ok": true,
+  "pid": int,
   "building": false,
   "root": { <root object, same fields as in wg status> },
   "build_ms": int,
@@ -90,6 +95,13 @@ same build.
   "total_ms": int
 }
 ```
+
+`pid` is the daemon PID. It is present in every reply: a new build, a joined
+build, and an already attached root.
+
+On Windows, human-readable `wg up` and `wg status` output removes the `\\?\`
+prefix from paths. JSON keeps the canonical path, which can keep the prefix.
+Compare paths after you normalize them.
 
 ### `wg status --json` shape
 
@@ -258,18 +270,23 @@ accepts files and directories normally.
 
 ## Recovery
 
-- **No daemon:** run `wg up`.
+- **No daemon:** `wg status` exits 2 and prints
+  `wg: no wg service is running for this cache; run wg up first`. Run `wg up`.
 - **Unhealthy semantic root:** run `wg down`, then `wg up`.
 - **Untrusted text index:** text searches fall back to a full scan.
   `wg status --json` shows `text.untrusted: true`. Run `wg down`, then `wg up` to
   restore index pruning.
-- **Failed build:** `wg status --json` shows `error`. One `wg up` clears the
-  failed build and starts a new one. If the new build fails, that call returns
+- **Failed build:** `wg status --json` shows `error`. The next single `wg up`
+  retries the build in the same call. If the new build fails, that call returns
   the new error. Check the cause, then run `wg up` again.
 - **Ctrl-C during `wg up`:** the daemon keeps building. Run `wg status --json`
   or `wg up` again to join the same build.
-- **Model mismatch:** a query that names `code` or `text` must match the model
-  used by `wg up`. Run `wg down`, then `wg up --model <model>` to change it.
+- **Model mismatch:** the model is fixed at `wg up`. A query that names `code`
+  or `text` must match it. The error names the attached model and gives the fix:
+  run `wg down`, then `wg up --model <model>`.
+- **Stop the daemon:** `wg down` is idempotent. With no daemon it exits 0 and
+  prints `No wg service is running.` The JSON reply is
+  `{"ok":true,"running":false}`.
 - **Many roots:** `wg down` stops the daemon for every attached root.
 
 ## Do not
