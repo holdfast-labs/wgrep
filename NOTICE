@@ -1,0 +1,63 @@
+# NOTICE
+
+`wg` is licensed under the MIT License. See `LICENSE`.
+
+`wg` includes or ships the third-party components below. The release archive
+contains the full license texts under `licenses/`, collected by
+`scripts/wg_release.py`. For the Rust crate dependencies, the archive also
+contains `licenses/DEPENDENCY_LICENSES.txt` and the copied license files under
+`licenses/deps/`. Those files are authoritative. This NOTICE is a summary.
+
+## sgrep
+
+Semantic ranking is derived from sgrep, pinned at revision `0fbe8e5`.
+License: MIT. See `LICENSE`.
+
+## CodeChunker and Kreuzberg portions
+
+- `src/splitter.rs` contains a port of CodeChunker.
+  Copyright (c) 2025 Chonkie.
+- `src/codechunker.rs` contains portions copyright 2025-2026 Kreuzberg, Inc.
+  and copyright (c) 2023 Benjamin Brandt.
+
+License: MIT. See `LICENSE`.
+
+## ripgrep 15.1.0
+
+The text engine and file walker are a vendored copy of ripgrep 15.1.0.
+Copyright (c) 2015 Andrew Gallant.
+
+License: MIT or Unlicense. See:
+
+- `third_party/ripgrep/LICENSE-MIT`
+- `third_party/ripgrep/UNLICENSE`
+- `third_party/ripgrep/COPYING`
+- `crates/wisp-grep/LICENSE-MIT`
+- `crates/wisp-grep/UNLICENSE`
+- `crates/wisp-grep/COPYING`
+
+The `wisp-grep` crate declares `Unlicense OR MIT`.
+
+## notify
+
+The filesystem watcher is a vendored copy of notify.
+
+License: CC0 1.0 Universal. See `vendor/notify/LICENSE-CC0`. Local changes are
+recorded in `vendor/notify/WGREP_PATCH.md`.
+
+## Embedding model
+
+`minishlab/potion-code-16M-v2` is downloaded at runtime. It is not shipped in
+the `wg` archive. The pinned revision is
+`e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`.
+
+License: MIT, as stated on the model card:
+https://huggingface.co/minishlab/potion-code-16M-v2
+
+## Rust crate dependencies
+
+The compiled `wg` binary contains other Rust crates. The release archive's
+`licenses/DEPENDENCY_LICENSES.txt` and `licenses/deps/` list the license files
+copied from the Cargo registry source that resolved `Cargo.lock`. If a package
+license file is not available in that cache, the index marks it `unavailable`
+instead of inventing a license.
