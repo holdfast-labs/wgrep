@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a problem with wg.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security issues here.** See
+        [SECURITY.md](https://github.com/holdfast-labs/wgrep/blob/main/SECURITY.md)
+        for private disclosure.
+  - type: input
+    id: version
+    attributes:
+      label: wg version
+      description: Run `wg --version`.
+      placeholder: wg 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux x64
+        - Windows x64
+        - macOS (not qualified)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: arch
+    attributes:
+      label: Architecture
+      description: For example x86_64 or aarch64.
+      placeholder: x86_64
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - GitHub Releases archive
+        - cargo install
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: Paste the full command, including flags and paths.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exit code and any error output.
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Route
+      description: Which wg route does the command use?
+      options:
+        - Text (`-F`, `-e`, or another ripgrep flag)
+        - Semantic query
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: wg status --json output
+      description: Paste the output, or "no daemon" if status fails.
+  - type: checkboxes
+    id: text_parity
+    attributes:
+      label: Text-route parity
+      description: For text-route bugs, check the same search with rg 15.1.
+      options:
+        - label: I checked that the same text search with rg 15.1 behaves differently.

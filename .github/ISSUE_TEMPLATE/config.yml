@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/holdfast-labs/wgrep/blob/main/README.md
+    about: Read the README, agent guide, and architecture page.
+  - name: Security report
+    url: https://github.com/holdfast-labs/wgrep/security/advisories/new
+    about: Report a vulnerability privately.
