@@ -499,9 +499,9 @@ fn attach(
             return Err("service root limit reached".into());
         }
     }
-    // Build the text index before subscribing. Its first query reconciles
-    // with rg's walker, so nothing between the build and the watcher can make
-    // a pruned answer stale.
+    // Build the text index before subscribing. Its file set is reconciled
+    // with rg's walker only after the watcher below is running, so nothing
+    // between the build and the watcher can make a pruned answer stale.
     if let Some(progress) = progress.as_ref() {
         progress.set_stage(wgrep::live::STAGE_TEXT);
     }
@@ -567,6 +567,17 @@ fn attach(
         }
     })?;
     watcher.watch(&path, RecursiveMode::Recursive)?;
+    // The watcher is live, so reconcile now: `wg up` returns a ready root and
+    // the first text query does not pay for the walk. On error the first query
+    // retries the reconcile.
+    if let Some(text) = text.as_ref() {
+        if let Err(error) = text.reconcile_now() {
+            eprintln!(
+                "wg: text index reconcile for {} deferred to first query: {error:#}",
+                path.display()
+            );
+        }
+    }
     let snapshot_path = snapshot_cache_path(&path, choice);
     let index = Arc::new(LiveIndex::open_with_cache_progress(
         &path,

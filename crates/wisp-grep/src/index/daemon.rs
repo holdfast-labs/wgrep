@@ -306,6 +306,15 @@ impl State {
         Ok(())
     }
 
+    /// Reconcile now if a rescan is pending. An embedding host calls this at
+    /// setup, so its first query does not pay for the walk.
+    pub(crate) fn reconcile_if_needed(&mut self) -> anyhow::Result<()> {
+        if self.needs_rescan {
+            self.reconcile()?;
+        }
+        Ok(())
+    }
+
     fn reconcile_walk(&mut self) -> anyhow::Result<()> {
         let index = self.index.clone();
         let n = index.file_count();

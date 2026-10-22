@@ -71,8 +71,9 @@ pub struct TextIndex {
 impl TextIndex {
     /// Open a root's index, building one when it is missing or unreadable.
     ///
-    /// The first query reconciles the cached file set with rg's walker, so a
-    /// caller must forward watcher events from before that query.
+    /// The cached file set is reconciled with rg's walker by
+    /// [`TextIndex::reconcile_now`] or, failing that, by the first query, so a
+    /// caller must forward watcher events from before either runs.
     pub fn open(root: &Path) -> anyhow::Result<TextIndex> {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let started = std::time::Instant::now();
@@ -151,6 +152,18 @@ impl TextIndex {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Reconcile the file set with rg's walker now, so the first query does
+    /// not pay for it. Call only after the host's watcher is running: a change
+    /// made before that would otherwise be missed. On error the rescan stays
+    /// pending and the first query retries it.
+    pub fn reconcile_now(&self) -> anyhow::Result<()> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("text index state lock poisoned"))?;
+        state.reconcile_if_needed()
     }
 
     /// Milliseconds spent opening or building the index for `wg up`.
