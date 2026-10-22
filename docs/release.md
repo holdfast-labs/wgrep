@@ -13,8 +13,10 @@ CI and release build with Rust `1.95`. This is the `rust-version` in
 `.github/workflows/ci.yml` runs on each push and pull request to `main`:
 
 - `cargo test --locked --lib --bins`
+- `cargo test --locked --test wg_lexical_parity --test wg_source_files_parity`
+- `cargo test --locked` in `crates/wisp-grep`
 - `cargo build --locked --release --bin wg`
-- `python scripts/wg_release.py self-test`
+- `python scripts/wg_release.py self-test --work <scratch-dir>`
 
 Jobs run on `ubuntu-latest` and `windows-latest`. Cargo caches are restored by
 `Swatinem/rust-cache`.
@@ -41,8 +43,11 @@ Jobs run on `ubuntu-latest` and `windows-latest`. Cargo caches are restored by
    `docs/launch/`. This source builds with
    `cargo build --locked --release --bin wg`.
 7. The workflow creates a **draft** GitHub Release. It uploads both archives and
-   a `SHA256SUMS` file. It does not publish the release.
+   a `SHA256SUMS` file. The draft body comes from `RELEASE_NOTES.md`; the
+   `publish` job writes `dist/RELEASE_BODY.md` with the `SHA256SUMS` content
+   filled into the Checksums placeholder. It does not publish the release.
 8. Review the draft:
+   - confirm the draft body and the filled Checksums block;
    - confirm the asset names and checksums;
    - confirm both smoke jobs passed;
    - confirm the source commit and tag;
@@ -50,6 +55,31 @@ Jobs run on `ubuntu-latest` and `windows-latest`. Cargo caches are restored by
 
 The workflow uses `--label RELEASE` and `--binary-status final`. The script
 default label stays `PREVIEW` for local test archives.
+
+## Draft release body
+
+`RELEASE_NOTES.md` is the source of the draft release body. The `publish` job
+checks out the release tag, writes `dist/RELEASE_BODY.md`, and passes it to the
+release action with `body_path`.
+
+`RELEASE_NOTES.md` must contain this marker on its own line in the Checksums
+section:
+
+```text
+<!-- SHA256SUMS -->
+```
+
+The job replaces the marker with a fenced `text` block that contains
+`dist/SHA256SUMS`. The body is not generated from commit history.
+
+`generate_release_notes` is `false`. The curated body is the whole body.
+GitHub's generated notes would append commit-derived text and make the draft
+less controlled. If maintainers want the auto notes, set it to `true` and
+accept the appended section.
+
+`dist/RELEASE_BODY.md` is not uploaded as an asset. The release asset list is
+explicit: `dist/*.zip`, `dist/*.tar.gz`, `dist/*.sha256`, and
+`dist/SHA256SUMS`.
 
 ## Archive contents
 
@@ -105,7 +135,7 @@ a clean machine. Run a second-person smoke before the first public release.
 ## Notes
 
 - macOS jobs are not enabled. A commented stub stays in `release.yml`.
-- The workflows were syntax-checked locally. They cannot run in this
-  environment. The first real run must be watched.
+- The workflows were syntax-checked locally. The release body step has not run
+  in this environment. The first real run must be watched.
 - The release workflow does not commit, tag, or publish. Those actions stay
   explicit maintainer steps.

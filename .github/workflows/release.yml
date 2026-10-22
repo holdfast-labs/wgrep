@@ -227,6 +227,10 @@ jobs:
       - windows
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -240,16 +244,39 @@ jobs:
             | sort -z | xargs -0 sha256sum > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Build release body from RELEASE_NOTES.md
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          notes = Path("RELEASE_NOTES.md").read_text(encoding="utf-8")
+          sums = Path("dist/SHA256SUMS").read_text(encoding="utf-8").strip()
+          marker = "<!-- SHA256SUMS -->"
+          if marker not in notes:
+              raise SystemExit(f"missing {marker} in RELEASE_NOTES.md")
+          if not sums:
+              raise SystemExit("dist/SHA256SUMS is empty")
+          block = "```text\n" + sums + "\n```"
+          Path("dist/RELEASE_BODY.md").write_text(
+              notes.replace(marker, block, 1), encoding="utf-8"
+          )
+          PY
+
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.WG_TAG }}
           name: ${{ env.WG_TAG }}
+          body_path: dist/RELEASE_BODY.md
           draft: true
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
-            dist/*
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/SHA256SUMS
 
   # macos:
   #   # TODO: add an x86_64/aarch64 macOS job after the build and smoke are

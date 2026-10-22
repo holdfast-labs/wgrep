@@ -82,7 +82,7 @@ use the cache. The text route does not need the model or `rg`.
 The release workflow generates `SHA256SUMS` for the Linux and Windows archives
 and attaches it to the release.
 
-<!-- SHA256SUMS: filled by .github/workflows/release.yml -->
+<!-- SHA256SUMS -->
 
 ## Credits
 
