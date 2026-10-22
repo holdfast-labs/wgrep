@@ -58,6 +58,7 @@ DEFAULT_TS_PACK = '/home/agent/.cache/tree-sitter-language-pack'
 CONTROL_SHA256 = '715946fa0f17006905b5f0d0bbf1f21c00e355882855ec40c44c14e78a3c6217'
 RG_VERSION = '15.1.0'
 MODEL = 'code'
+SETTLE_TIMEOUT_S = 120.0
 
 TEXT_ABSENT = 'zzqxjwvbnm_wg_text_absent_zzz'
 TEXT_RARE_POOL = [
@@ -518,7 +519,37 @@ class Bench:
         status = self.status(service_dir)
         self.require(status.get('ok') is True, f'up-{sid}: status not ok: {status}')
         self.require(status.get('pid'), f'up-{sid}: no daemon pid')
+        settle = self.settle_text_index(service_dir, sid)
+        self.flags.setdefault('settles', {})[sid] = settle
         return service_dir, status
+
+    def settle_text_index(self, service_dir, sid):
+        started = time.monotonic()
+        deadline = started + SETTLE_TIMEOUT_S
+        text = {}
+        while True:
+            status = self.status(service_dir)
+            roots = status.get('roots') or []
+            text = (roots[0].get('text') if roots else None) or {}
+            if 'building' not in text and 'pending' not in text:
+                break
+            building = text.get('building')
+            pending = text.get('pending')
+            if not building and pending in (0, None):
+                break
+            if time.monotonic() >= deadline:
+                raise BenchError(
+                    f'up-{sid}: text index did not settle within '
+                    f'{SETTLE_TIMEOUT_S:.0f} s (building={building!r}, '
+                    f'pending={pending!r}, indexed={text.get("indexed")!r}, '
+                    f'unindexed={text.get("unindexed")!r})')
+            time.sleep(0.1)
+        elapsed = time.monotonic() - started
+        print(f'up-{sid}: text index settled in {elapsed:.3f}s '
+              f'indexed={text.get("indexed")} unindexed={text.get("unindexed")}',
+              flush=True)
+        return {'seconds': elapsed, 'indexed': text.get('indexed'),
+                'unindexed': text.get('unindexed')}
 
     def status(self, service_dir):
         proc = self.run([self.args.wg, 'status', '--json'], timeout=30, tag='status',
@@ -1366,6 +1397,10 @@ class Bench:
         flat['rg_version'] = RG_VERSION
         flat['model_choice'] = MODEL
         flat['top_k_default'] = self.args.top
+        for sid, settle in sorted(self.flags.get('settles', {}).items()):
+            flat[f'settle_{sid}_seconds'] = settle['seconds']
+            flat[f'settle_{sid}_text_indexed'] = settle['indexed']
+            flat[f'settle_{sid}_text_unindexed'] = settle['unindexed']
 
         # Freshness
         records = self.flags.get('freshness_records', [])

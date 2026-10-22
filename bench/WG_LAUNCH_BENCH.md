@@ -42,6 +42,9 @@ index per repository stayed on disk.
 ## Method
 
 - One campaign (`campaign-e`). Warmups are excluded from every distribution.
+- After `wg up`, the harness waits up to 120 s for the text index to report
+  `building: false` and `pending: 0`, then records the settle time and final
+  indexed/unindexed counts.
 - Every subprocess has a timeout and a checked return code.
 - Latency includes process start, loopback IPC and daemon work. It is not
   daemon-internal scoring time.
