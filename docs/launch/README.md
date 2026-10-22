@@ -12,19 +12,20 @@ The `wg` crate is at the repository root.
 - Square terminal clips and the square hero are not produced. The 68-character
   result path is not readable at 1080 square.
 - Square charts and square title/end cards remain as standalone PNG images.
-- Binary commit: `22666005ae3a1e04cdcf8751f5b7f26b91cce403`
+- Binary commit: `2cee82c`
 - Binary SHA-256:
-  `3f7bf72af9b6e2928d66aa0f916833e60a107df2811fcaca7def354769d251e7`
-- Render run: `/srv/projects/wispd/m/20261022-043511`
-- Logs: `/srv/logs/wispd/wg-launch-media-20261022-043511/`
+  `0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`
+- Render run: `/srv/projects/wispd/wg-media-2cee82c/run/20261022-224247`
+- Logs: `/srv/logs/wispd/wg-launch-media-20261022-224247/`
 - Final assets are in `media/`, `charts/`, and `cards/`.
-- The charts are regenerated from the Phase E results JSON. The checked-in
-  rg-flags clip and the 16:9 hero still show Phase D chart and caption values.
-  Re-render both before release. The hook, live, and multi-repo clips and the
-  README GIFs show no stale benchmark number.
+- The charts are regenerated from the Phase E results JSON. The rg-flags
+  clip, the 16:9 hero, the multi-repo clip, and the README multi-repo GIF and
+  MP4 are rendered from commit `2cee82c`. The multi-repo status shows
+  `text: ready [current], 13333 files (13290 indexed, 43 unindexed)`.
 - `E:\wg-launch-media\review\` has the eight chart PNGs and full-size final
   frames for the four 16:9 clips and the 16:9 hero. The Phase E charts are in
-  `E:\wg-launch-media\review\phaseE-charts\`.
+  `E:\wg-launch-media\review\phaseE-charts\`. The clip review frames are in
+  `E:\wg-launch-media\review\phaseE-clips3\`.
 
 ## Corpus
 
@@ -36,8 +37,9 @@ The clips search a copy of the Rust source tree:
 - VPS campaign corpus: 13,448 files, 148.7 MB.
 
 The render script copies the corpus to a scratch directory and builds an
-isolated index for each clip. The visible part of each clip is warm. The
-one-time `wg up` index build is hidden.
+isolated index for each clip. The visible semantic searches are warm. The
+one-time `wg up` semantic build is hidden. The multi-repo tape waits in the
+hidden setup until `wg status --json` reports `"building":false`.
 
 ## Hook question
 
@@ -89,8 +91,8 @@ All final files are below 8 MB and are in the repository.
 | Hook | `media/wg-hook-16x9.mp4` | 16:9, 7.0 s, 81 KB |
 | Live edit | `media/wg-live-16x9.mp4` | 16:9, 8.0 s, 78 KB |
 | rg flags | `media/wg-rg-flags-16x9.mp4` | 16:9, 10.4 s, 187 KB |
-| Two repositories | `media/wg-multi-repo-16x9.mp4` | 16:9, 6.2 s, 137 KB |
-| Hero | `media/wg-launch-hero-16x9.mp4` | 16:9, 49.1 s, 711 KB |
+| Two repositories | `media/wg-multi-repo-16x9.mp4` | 16:9, 6.2 s, 142 KB |
+| Hero | `media/wg-launch-hero-16x9.mp4` | 16:9, 49.1 s, 703 KB |
 | Charts | `charts/01-edit-searchable-*.png` | 16:9 and 1:1 PNG |
 | Charts | `charts/02-warm-query-*.png` | 16:9 and 1:1 PNG |
 | Charts | `charts/03-fanout-16-*.png` | 16:9 and 1:1 PNG |
@@ -122,30 +124,28 @@ Burned-in captions:
 Build the launch binary from a source export on the VPS:
 
 ```sh
-git -C /c/git/wispd archive 575c8e7 \
-  | ssh vps 'mkdir -p /srv/projects/wispd/wg-launch-build/src && \
-             tar -C /srv/projects/wispd/wg-launch-build/src -xf -'
+git -C /c/git/wispd archive 2cee82c \
+  | ssh vps 'mkdir -p /srv/projects/wispd/wg-media-2cee82c/src && \
+             tar -C /srv/projects/wispd/wg-media-2cee82c/src -xf -'
 ssh vps
 source ~/.cargo/env
-cd /srv/projects/wispd/wg-launch-build/src
-cargo build --locked --release --bin wg -j2
+cd /srv/projects/wispd/wg-media-2cee82c/src
+CARGO_TARGET_DIR=/srv/projects/wispd/wg-media-2cee82c/target \
+  cargo build --locked --release --bin wg -j2
 ```
 
-The recorded run used HEAD `22666005ae3a1e04cdcf8751f5b7f26b91cce403` plus the
-text reconcile fix in `src/service.rs`, `crates/wisp-grep/src/text.rs` and
-`crates/wisp-grep/src/index/daemon.rs`, before that fix was committed as
-`575c8e7`; the source is the same. Binary SHA-256:
-`3f7bf72af9b6e2928d66aa0f916833e60a107df2811fcaca7def354769d251e7`.
-The build target was removed after the binary was copied to
-`/srv/projects/wispd/m/bin/wg`.
+The recorded run used `2cee82c`. Binary SHA-256:
+`0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`.
+The binary was copied to `/srv/projects/wispd/wg-media-2cee82c/bin/wg`, and the
+build target was removed after the render.
 
 ## Re-render
 
 ```sh
-export WG_BIN=/srv/projects/wispd/m/bin/wg
+export WG_BIN=/srv/projects/wispd/wg-media-2cee82c/bin/wg
 export WG_RG=/srv/workspaces/wispd/tools/rg-15/rg
 export WG_LAUNCH_CORPUS_SRC=/srv/workspaces/wispd/prof/src
-export WG_LAUNCH_ROOT=/srv/projects/wispd/m
+export WG_LAUNCH_ROOT=/srv/projects/wispd/wg-media-2cee82c/run
 python3 docs/launch/make_cards.py
 python3 docs/launch/make_charts.py
 bash scripts/render_launch_media.sh
@@ -167,7 +167,7 @@ The script:
 
 Default locations:
 
-- Run directory: `/srv/projects/wispd/m/<stamp>/`
+- Run directory: `/srv/projects/wispd/wg-media-2cee82c/run/<stamp>/`
 - Logs: `/srv/logs/wispd/wg-launch-media-<stamp>/`
 - Probe JSON: `<run>/probe/`
 - Contact sheets: `<run>/sheets/`

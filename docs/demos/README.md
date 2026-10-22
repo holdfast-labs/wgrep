@@ -9,7 +9,7 @@ two-file `api-server` repository. They are not toy fixtures.
 |---|---|---:|
 | `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x700, 12.6 s, 354,046 B |
 | `live` | an edit is searchable before the next prompt | 1200x560, 6.2 s, 147,422 B |
-| `multi-repo` | two roots behind one daemon and one model | 1200x700, 6.0 s, 281,048 B |
+| `multi-repo` | two roots behind one daemon and one model | 1200x700, 6.0 s, 285,290 B |
 
 The README captions are:
 
@@ -26,14 +26,18 @@ launch rg-flags clip.
 
 ## Binary and corpus
 
-The checked-in GIFs use the release binary built from `git archive 4e9a8be`:
+The multi-repo GIF and MP4 use the release binary built from `git archive
+2cee82c`:
 
-- Commit: `4e9a8be`
+- Commit: `2cee82c`
 - Binary SHA-256:
-  `f2eb5ca4977c49cbdbaa4ac272afeeab01519c244db03edaa598aeb1fb521581`
+  `0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`
 - Build: `cargo build --locked --release --bin wg -j2`
 - The VPS build target was removed after copying the binary to
-  `/srv/projects/wispd/m/bin/wg-demos`.
+  `/srv/projects/wispd/wg-media-2cee82c/bin/wg`.
+
+The quickstart and live GIFs remain from `git archive 4e9a8be` (SHA-256
+`f2eb5ca4977c49cbdbaa4ac272afeeab01519c244db03edaa598aeb1fb521581`).
 
 The visible roots are under `$HOME/code`, so no `/srv/`, `wispd`, or run-id
 string appears in a recording:
@@ -52,8 +56,8 @@ The checked-in assets are rendered with:
 
 ```sh
 export PATH=/srv/projects/wispd/wg-launch-media-20261020/tools/bin:$PATH
-export WG_DEMO_ROOT=/srv/projects/wispd/m/gif-demos
-export WG_BIN=/srv/projects/wispd/m/bin/wg-demos
+export WG_DEMO_ROOT=/srv/projects/wispd/wg-media-2cee82c/demo
+export WG_BIN=/srv/projects/wispd/wg-media-2cee82c/bin/wg
 export WG_DEMO_CORPUS_SRC=/srv/workspaces/wispd/prof/src
 export WG_DEMO_HOME=$HOME/code
 bash scripts/render_wg_demos.sh

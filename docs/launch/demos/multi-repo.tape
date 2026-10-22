@@ -27,6 +27,9 @@ Enter
 Wait+Screen /PID:/
 Wait+Line /\$$/
 Sleep 1s
+Type `until wg status --json | grep -q '"building":false'; do sleep 0.5; done`
+Enter
+Wait+Line /\$$/
 Type "clear"
 Enter
 Sleep 500ms
