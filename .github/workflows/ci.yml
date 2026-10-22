@@ -133,6 +133,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --locked --test wg_macos_fsevents -- --exact non_utf8_file_name_does_not_panic_the_watcher --nocapture
 
+      - name: Run notify two-watcher purge test
+        if: ${{ !cancelled() }}
+        # vendor/notify is its own workspace and its Cargo.lock is not
+        # committed, so this test-only step cannot use --locked.
+        run: cargo test --manifest-path vendor/notify/Cargo.toml --lib dropping_one_watcher_does_not_purge_another -- --nocapture
+
       - name: Run parity tests against rg 15.1.0
         if: ${{ !cancelled() }}
         run: cargo test --locked --test wg_lexical_parity --test wg_source_files_parity

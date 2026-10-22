@@ -650,3 +650,184 @@ fn test_steam_context_info_send_and_sync() {
     fn check_send<T: Send + Sync>() {}
     check_send::<StreamContextInfo>();
 }
+
+/// The stop path calls `FSEventsPurgeEventsForDeviceUpToEventId`, which is
+/// device-wide. Two watchers on one volume must not purge each other's queued
+/// events. The handler for the second watcher blocks inside its first callback
+/// so the burst is still queued when the first watcher stops.
+#[cfg(all(test, target_os = "macos"))]
+mod wgrep_device_purge_tests {
+    use super::*;
+    use std::sync::mpsc::{self, Receiver};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    struct Gate {
+        open: Mutex<bool>,
+        ready: Condvar,
+    }
+
+    impl Gate {
+        fn new() -> Gate {
+            Gate {
+                open: Mutex::new(false),
+                ready: Condvar::new(),
+            }
+        }
+
+        fn wait_open(&self) {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.ready.wait(open).unwrap();
+            }
+        }
+
+        fn open(&self) {
+            let mut open = self.open.lock().unwrap();
+            *open = true;
+            self.ready.notify_all();
+        }
+    }
+
+    /// Releases the blocked callback on panic so a failed test cannot hang the
+    /// watcher drop.
+    struct ReleaseOnDrop(Arc<Gate>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
+    struct BlockingHandler {
+        events: mpsc::Sender<Result<Event>>,
+        gate: Arc<Gate>,
+        entered: mpsc::Sender<()>,
+        first: bool,
+    }
+
+    impl EventHandler for BlockingHandler {
+        fn handle_event(&mut self, event: Result<Event>) {
+            if !self.first {
+                self.first = true;
+                let _ = self.entered.send(());
+                self.gate.wait_open();
+            }
+            let _ = self.events.send(event);
+        }
+    }
+
+    fn wait_for(
+        events: &Receiver<Result<Event>>,
+        matches: impl Fn(&Event) -> bool,
+        seconds: u64,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            match events.recv_timeout(deadline - now) {
+                Ok(Ok(event)) if matches(&event) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    }
+
+    fn wait_for_name(events: &Receiver<Result<Event>>, name: &str, seconds: u64) -> bool {
+        wait_for(
+            events,
+            |event| {
+                event
+                    .paths
+                    .iter()
+                    .any(|path| path.file_name().and_then(|part| part.to_str()) == Some(name))
+            },
+            seconds,
+        )
+    }
+
+    fn wait_for_prefix(events: &Receiver<Result<Event>>, prefix: &str, seconds: u64) -> bool {
+        wait_for(
+            events,
+            |event| {
+                event.paths.iter().any(|path| {
+                    path.file_name()
+                        .and_then(|part| part.to_str())
+                        .is_some_and(|part| part.starts_with(prefix))
+                })
+            },
+            seconds,
+        )
+    }
+
+    #[test]
+    fn dropping_one_watcher_does_not_purge_another() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let gate = Arc::new(Gate::new());
+        let (entered_tx, entered_rx) = mpsc::channel();
+
+        let mut first = FsEventWatcher::new(first_tx, Config::default()).unwrap();
+        let mut second = FsEventWatcher::new(
+            BlockingHandler {
+                events: second_tx,
+                gate: gate.clone(),
+                entered: entered_tx,
+                first: false,
+            },
+            Config::default(),
+        )
+        .unwrap();
+        let _release = ReleaseOnDrop(gate.clone());
+
+        first
+            .watch(first_dir.path(), RecursiveMode::Recursive)
+            .unwrap();
+        second
+            .watch(second_dir.path(), RecursiveMode::Recursive)
+            .unwrap();
+
+        std::fs::write(first_dir.path().join("first-ready.txt"), b"first").unwrap();
+        assert!(
+            wait_for_name(&first_rx, "first-ready.txt", 10),
+            "the first watcher did not start"
+        );
+
+        std::fs::write(second_dir.path().join("second-prime.txt"), b"second").unwrap();
+        assert!(
+            entered_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the second watcher did not start"
+        );
+
+        // The second watcher's callback is blocked, so these events stay queued.
+        for index in 0..64 {
+            std::fs::write(
+                second_dir.path().join(format!("second-burst-{index}.txt")),
+                b"burst",
+            )
+            .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Stopping the first watcher purges device events up to the current id.
+        drop(first);
+        gate.open();
+
+        assert!(
+            wait_for_prefix(&second_rx, "second-burst-", 10),
+            "the second watcher lost queued events when the first watcher stopped; \
+             FSEventsPurgeEventsForDeviceUpToEventId is device-wide"
+        );
+
+        std::fs::write(second_dir.path().join("second-after-stop.txt"), b"after").unwrap();
+        assert!(
+            wait_for_name(&second_rx, "second-after-stop.txt", 10),
+            "the second watcher stopped receiving events after the first watcher stopped"
+        );
+    }
+}

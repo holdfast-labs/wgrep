@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """wg preview packaging helper.
 
-Builds reproducible Windows/Linux PREVIEW archives for the `wg` crate at the
-repository root from an explicit source export, with checksums, source
+Builds reproducible Windows/Linux/macOS PREVIEW archives for the `wg` crate at
+the repository root from an explicit source export, with checksums, source
 identity, license/provenance copies, and a clean-install smoke test.
 
 This tool never commits, tags, uploads, or creates a release. It never builds
@@ -169,6 +169,13 @@ PLATFORM_TARGETS = {
     "windows-arm64": "aarch64-pc-windows-msvc",
     "linux-x64": "x86_64-unknown-linux-gnu",
     "linux-arm64": "aarch64-unknown-linux-gnu",
+    "macos-x64": "x86_64-apple-darwin",
+    "macos-arm64": "aarch64-apple-darwin",
+}
+
+MACHO_CPUS = {
+    0x01000007: "x64",
+    0x0100000C: "arm64",
 }
 
 DEFAULT_WORK = Path("E:/wgrep-worktrees/wg-release-20261018")
@@ -462,6 +469,14 @@ def export_notice_text(repo, git_info, export_id, file_count):
     return "\n".join(lines) + "\n"
 
 
+MACHO_MAGICS = {
+    b"\xcf\xfa\xed\xfe",  # 64-bit little-endian, magic 0xfeedfacf
+    b"\xfe\xed\xfa\xcf",  # 64-bit big-endian, magic 0xcffaedfe
+    b"\xca\xfe\xba\xbe",  # fat, magic 0xcafebabe
+    b"\xbe\xba\xfe\xca",  # fat, byte-swapped magic
+}
+
+
 def detect_format(path: Path):
     with open(path, "rb") as f:
         head = f.read(4)
@@ -469,6 +484,8 @@ def detect_format(path: Path):
         return "PE"
     if head[:4] == b"\x7fELF":
         return "ELF"
+    if head in MACHO_MAGICS:
+        return "Mach-O"
     return "unknown"
 
 
@@ -500,12 +517,52 @@ def elf_arch(path: Path):
     return {0x3E: "x64", 0xB7: "arm64", 0x03: "x86"}.get(machine)
 
 
+def macho_arch(path: Path):
+    """Return "x64", "arm64", or "universal" for a thin or fat Mach-O binary."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+            if len(head) < 8:
+                return None
+            magic = head[:4]
+            if magic == b"\xcf\xfa\xed\xfe":
+                return MACHO_CPUS.get(struct.unpack("<I", head[4:8])[0])
+            if magic == b"\xfe\xed\xfa\xcf":
+                return MACHO_CPUS.get(struct.unpack(">I", head[4:8])[0])
+            if magic == b"\xca\xfe\xba\xbe":
+                order = ">"
+            elif magic == b"\xbe\xba\xfe\xca":
+                order = "<"
+            else:
+                return None
+            fat_count = struct.unpack(order + "I", head[4:8])[0]
+            if fat_count == 0 or fat_count > 64:
+                return None
+            arches = set()
+            for _ in range(fat_count):
+                entry = f.read(20)
+                if len(entry) < 20:
+                    return None
+                arch = MACHO_CPUS.get(struct.unpack(order + "I", entry[:4])[0])
+                if arch:
+                    arches.add(arch)
+    except (OSError, struct.error):
+        return None
+    if len(arches) == 1:
+        return next(iter(arches))
+    if len(arches) > 1:
+        return "universal"
+    return None
+
+
 def platform_of(path: Path):
     fmt = detect_format(path)
     if fmt == "PE":
         return "windows-" + (pe_arch(path) or "unknown")
     if fmt == "ELF":
         return "linux-" + (elf_arch(path) or "unknown")
+    if fmt == "Mach-O":
+        return "macos-" + (macho_arch(path) or "unknown")
     return "unknown"
 
 
@@ -991,10 +1048,10 @@ def cmd_archive(args):
     wg_platform = platform_of(binary_wg)
     if platform == "auto":
         platform = wg_platform
-    if platform == "unknown":
+    if platform == "unknown" or platform.endswith("-unknown"):
         raise ReleaseError(f"cannot detect binary format for --wg: {binary_wg}")
-    if detect_format(binary_wg) not in ("PE", "ELF"):
-        raise ReleaseError(f"--wg is not a PE/ELF binary: {binary_wg}")
+    if detect_format(binary_wg) not in ("PE", "ELF", "Mach-O"):
+        raise ReleaseError(f"--wg is not a PE/ELF/Mach-O binary: {binary_wg}")
     if wg_platform != platform:
         raise ReleaseError(
             f"--wg format {wg_platform} does not match platform label {platform}"
@@ -1453,6 +1510,23 @@ def fake_binary(path: Path, kind: str):
         data[0:4] = b"\x7fELF"
         struct.pack_into("<H", data, 18, 0x3E)
         path.write_bytes(bytes(data))
+    elif kind in ("MACHO_ARM64", "MACHO_X64", "MACHO_BE_X64"):
+        data = bytearray(32)
+        if kind == "MACHO_BE_X64":
+            data[0:4] = b"\xfe\xed\xfa\xcf"
+            struct.pack_into(">I", data, 4, 0x01000007)
+        else:
+            data[0:4] = b"\xcf\xfa\xed\xfe"
+            cpu = 0x0100000C if kind == "MACHO_ARM64" else 0x01000007
+            struct.pack_into("<I", data, 4, cpu)
+        path.write_bytes(bytes(data))
+    elif kind == "MACHO_FAT":
+        data = bytearray(8 + 2 * 20)
+        data[0:4] = b"\xca\xfe\xba\xbe"
+        struct.pack_into(">I", data, 4, 2)
+        struct.pack_into(">I", data, 8, 0x01000007)
+        struct.pack_into(">I", data, 8 + 20, 0x0100000C)
+        path.write_bytes(bytes(data))
     else:
         path.write_bytes(b"unknown")
     return path
@@ -1680,6 +1754,42 @@ def run_self_test(args):
             return ("PASS", f"refused OS/label mismatch: {exc}")
         return ("FAIL", "OS/label mismatch was not refused")
 
+    def case_macho_detection():
+        arm = fake_binary(sandbox / "wg-macho-arm64", "MACHO_ARM64")
+        x64 = fake_binary(sandbox / "wg-macho-x64", "MACHO_X64")
+        x64_be = fake_binary(sandbox / "wg-macho-x64-be", "MACHO_BE_X64")
+        fat = fake_binary(sandbox / "wg-macho-fat", "MACHO_FAT")
+        for binary in (arm, x64, x64_be, fat):
+            assert detect_format(binary) == "Mach-O", detect_format(binary)
+        assert platform_of(arm) == "macos-arm64", platform_of(arm)
+        assert platform_of(x64) == "macos-x64", platform_of(x64)
+        assert platform_of(x64_be) == "macos-x64", platform_of(x64_be)
+        assert platform_of(fat) == "macos-universal", platform_of(fat)
+        unknown = fake_binary(sandbox / "wg-unknown", "UNKNOWN")
+        assert detect_format(unknown) == "unknown", detect_format(unknown)
+        return ("PASS", "thin 64-bit and fat Mach-O headers detected")
+
+    def case_macho_archive():
+        repo = make_mini_repo(sandbox / "r-macho")
+        export = export_tree(repo, sandbox / "o-macho")
+        wg = fake_binary(sandbox / "wg-macho-archive", "MACHO_ARM64")
+        out = sandbox / "a-macho.tar.gz"
+        ns = argparse.Namespace(
+            work=str(sandbox / "aw-macho"), wg=str(wg), platform="auto",
+            export=str(export.out_dir), repo=str(repo), version="9.9.9",
+            build_id="macho", out=str(out), force=True,
+            binary_status="self-test-fixture", cargo_registry=None, json=False,
+        )
+        cmd_archive(ns)
+        with tarfile.open(out, "r:gz") as tf:
+            names = set(tf.getnames())
+            root = f"wg-9.9.9-macos-arm64-{LABEL}-macho"
+            assert f"{root}/bin/wg" in names, f"missing bin/wg: {sorted(names)[:5]}"
+            assert f"{root}/bin/wg.exe" not in names, "macOS archive contains wg.exe"
+            info = json.loads(tf.extractfile(f"{root}/PROVENANCE/BUILD_INFO.json").read())
+            assert info["platform"] == "macos-arm64", info["platform"]
+        return ("PASS", "macOS arm64 archive uses bin/wg")
+
     def case_archive_rejects_rg():
         parser = build_parser()
         saved = sys.stderr
@@ -1769,6 +1879,8 @@ def run_self_test(args):
         ("archive ships only wg plus source and notices", case_archive_paths),
         ("archive fails when a compiled crate has no license", case_missing_license),
         ("archive refuses OS/label mismatch", case_magic_mismatch),
+        ("detects thin and fat Mach-O headers", case_macho_detection),
+        ("archives a Mach-O binary as tar.gz with bin/wg", case_macho_archive),
         ("archive rejects removed --rg option", case_archive_rejects_rg),
         ("archive fails on missing --wg", case_missing_binary),
         ("archive refuses existing output file", case_archive_overwrite),
@@ -1799,7 +1911,8 @@ def build_parser():
     ap.add_argument("--wg", required=True)
     ap.add_argument("--platform", default="auto",
                     choices=["auto", "windows-x64", "windows-arm64",
-                             "linux-x64", "linux-arm64"])
+                             "linux-x64", "linux-arm64",
+                             "macos-x64", "macos-arm64", "macos-universal"])
     ap.add_argument("--export", default=None)
     ap.add_argument("--repo", default=str(REPO_ROOT))
     ap.add_argument("--out", default=None)

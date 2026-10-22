@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, Instant};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -185,6 +185,26 @@ impl Daemon {
         );
         guard.alive = true;
         guard
+    }
+
+    /// Runs `wg down` with a hard limit. A timeout means the FSEvents stop
+    /// path did not finish, so the test reports that instead of hanging.
+    fn stop(&mut self, seconds: u64, label: &str) -> Outcome {
+        let mut command = Command::new(wg_bin());
+        command
+            .current_dir(&self.cwd)
+            .env("WG_SERVICE_DIR", &self.service)
+            .env("WGREP_INDEX_DIR", &self.indexes)
+            .arg("down");
+        let outcome = run_optional(command, seconds).unwrap_or_else(|| {
+            panic!(
+                "{label}: wg down did not exit within {seconds}s; the FSEvents stop path is spinning under load"
+            )
+        });
+        if outcome.status.success() {
+            self.alive = false;
+        }
+        outcome
     }
 }
 
@@ -514,4 +534,57 @@ fn non_utf8_file_name_does_not_panic_the_watcher() {
         return;
     }
     eprintln!("skipping: HFS+ fallback also rejects non-UTF-8 file names");
+}
+
+/// The FSEvents stop path waits for the stream run loop to become idle. Run
+/// that path 20 times while several threads write files, and fail with a clear
+/// message if `wg down` does not exit within 30 seconds.
+#[test]
+fn repeated_down_under_write_load_does_not_spin() {
+    const ROUNDS: usize = 20;
+    const WRITERS: usize = 4;
+    const FILES_PER_WRITER: usize = 32;
+
+    let started = Instant::now();
+    for round in 0..ROUNDS {
+        let scratch = Scratch::new(&format!("stop-spin-{round}"));
+        scratch.write(
+            "seed.rs",
+            "fn wg_macos_stop_spin_seed() { let needle = 1; }\n",
+        );
+        let mut daemon = Daemon::start(&scratch);
+
+        let barrier = Arc::new(Barrier::new(WRITERS + 1));
+        let mut writers = Vec::with_capacity(WRITERS);
+        for writer in 0..WRITERS {
+            let root = scratch.root.clone();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for file in 0..FILES_PER_WRITER {
+                    let path = root.join(format!("burst-{writer}-{file}.rs"));
+                    std::fs::write(
+                        &path,
+                        format!("fn wg_macos_stop_spin_{writer}_{file}() {{ let needle = 1; }}\n"),
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+        // Start the writes first, then stop the daemon while they are active.
+        barrier.wait();
+        let outcome = daemon.stop(30, &format!("round {round}"));
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert!(
+            outcome.status.success(),
+            "wg down failed on round {round}: {}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+    }
+    eprintln!(
+        "{ROUNDS} rounds of write load plus wg down took {:?}",
+        started.elapsed()
+    );
 }

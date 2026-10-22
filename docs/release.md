@@ -157,7 +157,13 @@ a clean machine. Run a second-person smoke before the first public release.
 
 ## Notes
 
-- macOS jobs are not enabled. A commented stub stays in `release.yml`.
+- `scripts/wg_release.py` detects 64-bit Mach-O binaries (`0xfeedfacf` and
+  `0xcffaedfe`) and fat binaries (`0xcafebabe`). Thin binaries get the
+  `macos-x64` or `macos-arm64` platform label. A fat binary gets
+  `macos-universal`.
+- macOS jobs are not enabled. A commented stub stays in `release.yml`. A real
+  macOS release job would need a `macos-14` runner, an arm64 or x64 `wg`
+  build, and an archive step with `--platform macos-arm64` or `macos-x64`.
 - The workflows were syntax-checked locally. The release body step has not run
   in this environment. The first real run must be watched.
 - The release workflow does not commit, tag, or publish. Those actions stay
