@@ -86,3 +86,62 @@ jobs:
 
       - name: Packaging self-test
         run: ${{ matrix.python }} scripts/wg_release.py self-test --work "${{ runner.temp }}/wg-self-test"
+
+  # Informational only. macOS is not qualified yet, so this job may fail and
+  # must not make CI red. Remove continue-on-error after the first green run.
+  macos:
+    name: test (macos-14, informational)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep 15.1.0 (macOS arm64)
+        shell: bash
+        env:
+          RG_ASSET: ripgrep-15.1.0-aarch64-apple-darwin.tar.gz
+          RG_SHA256: 378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${RG_ASSET}" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/${RG_ASSET}"
+          actual=$(shasum -a 256 "${RUNNER_TEMP}/${RG_ASSET}" | awk '{print $1}')
+          if [ "${actual}" != "${RG_SHA256}" ]; then
+            echo "ripgrep SHA-256 mismatch: expected ${RG_SHA256}, got ${actual}" >&2
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/rg"
+          tar --extract --gzip --file "${RUNNER_TEMP}/${RG_ASSET}" \
+            --directory "${RUNNER_TEMP}/rg" --strip-components=1
+          echo "${RUNNER_TEMP}/rg" >> "${GITHUB_PATH}"
+
+      - name: Check ripgrep
+        run: rg --version
+
+      - name: Run library and binary tests
+        run: cargo test --locked --lib --bins
+
+      - name: Run parity tests against rg 15.1.0
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --test wg_lexical_parity --test wg_source_files_parity
+
+      - name: Run wisp-grep tests
+        if: ${{ !cancelled() }}
+        working-directory: crates/wisp-grep
+        run: cargo test --locked
+
+      - name: Build release wg
+        if: ${{ !cancelled() }}
+        run: cargo build --locked --release --bin wg
+
+      - name: Packaging self-test
+        if: ${{ !cancelled() }}
+        run: python3 scripts/wg_release.py self-test --work "${{ runner.temp }}/wg-self-test"
