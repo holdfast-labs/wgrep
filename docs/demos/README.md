@@ -7,7 +7,7 @@ two-file `api-server` repository. They are not toy fixtures.
 
 | clip | shows | GIF |
 |---|---|---:|
-| `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x700, 9.1 s, 281,509 B |
+| `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x700, 12.6 s, 354,046 B |
 | `live` | an edit is searchable before the next prompt | 1200x560, 6.2 s, 147,422 B |
 | `multi-repo` | two roots behind one daemon and one model | 1200x700, 6.0 s, 281,048 B |
 
@@ -17,9 +17,11 @@ The README captions are:
 - `live`: *No restart. The edit is searchable before the next prompt returns.*
 - `multi-repo`: *One daemon, one model, two repositories.*
 
-A `wg-text-speed` clip was tested and dropped. The one-shot `time wg` result
-stayed around 58 ms, while `time rg` was around 80 ms. That is not the 10x
-rare-term result, so the clip would mislead. The timed comparison remains in the
+A `wg-text-speed` clip was tested and dropped. The trial's one-shot `time wg`
+result was around 58 ms, against around 80 ms for `time rg`. A follow-up with
+a warmup query measured 6 ms, and `WGREP_INDEX_EVENTS` reported
+`used=daemon`, `reason=null`. The trial was not an index fallback. The sequence
+was not stable enough for a README clip, so the timed comparison remains in the
 launch rg-flags clip.
 
 ## Binary and corpus
@@ -57,7 +59,7 @@ export WG_DEMO_HOME=$HOME/code
 bash scripts/render_wg_demos.sh
 ```
 
-Run that from the repository root. The script:
+Run that from the repository root. Set `WG_DEMO_ONLY=quickstart` to render one clip. The script:
 
 1. copies the corpus to `$HOME/code/rust` and `$HOME/code/live`;
 2. renders the tapes at 1200 px wide with the Catppuccin frame;

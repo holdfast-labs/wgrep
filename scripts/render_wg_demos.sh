@@ -160,9 +160,20 @@ render_clip() {
   rm -rf "$work"
 }
 
-render_clip quickstart "$demo_home/rust"
-render_clip live "$demo_home/live" "" 1
-render_clip multi-repo "$demo_home/rust" "$demo_home/api-server"
+only=${WG_DEMO_ONLY:-}
+want() {
+  [[ -z "$only" || ",$only," == *",$1,"* ]]
+}
+
+if want quickstart; then
+  render_clip quickstart "$demo_home/rust"
+fi
+if want live; then
+  render_clip live "$demo_home/live" "" 1
+fi
+if want multi-repo; then
+  render_clip multi-repo "$demo_home/rust" "$demo_home/api-server"
+fi
 
 rm -rf "$demo_home/rust" "$demo_home/live" "$demo_home/api-server"
 rmdir "$demo_home" 2>/dev/null || true
