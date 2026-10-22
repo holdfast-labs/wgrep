@@ -419,7 +419,7 @@ fn index_one(
     })
 }
 
-fn mtime_ns_now() -> Option<i64> {
+pub(crate) fn mtime_ns_now() -> Option<i64> {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 

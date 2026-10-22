@@ -137,6 +137,16 @@ impl FileClock {
     }
 }
 
+/// One file the walk saw that the index does not hold.
+#[derive(Clone, Copy)]
+struct Added {
+    /// Position in rg's walk order.
+    seq: u32,
+    /// A rebuild may still index it: it could have been skipped only because
+    /// it was inside the builder's racy window.
+    pending: bool,
+}
+
 /// What a scoped examination concluded about one watched path. Data only:
 /// ids and currency are resolved against the current index under the write
 /// lock at apply time, so a generation swap in between cannot corrupt state.
@@ -173,7 +183,7 @@ pub(crate) struct State {
     /// Files the walk saw that are not in the index (new), by path relative
     /// to `root_arg`, with their walk order. A map (not a `Vec`) so creating
     /// or deleting one file is O(1) instead of a linear scan.
-    added: HashMap<String, u32>,
+    added: HashMap<String, Added>,
     needs_rescan: bool,
     /// Why the pending rescan runs. Set by `flag_rescan` alongside
     /// `needs_rescan`; only read when a walk actually runs.
@@ -186,15 +196,21 @@ pub(crate) struct State {
     /// `docs/WGREP_INCREMENTAL_FRESHNESS.md`).
     next_seq: u32,
     dirty: usize,
-    /// Bumped whenever a path enters `added`. A rebuild of added files runs
-    /// only once per value, so files the builder can never index (UTF-16 BOM,
-    /// high-diversity, unreadable) cannot trigger rebuilds forever.
+    /// Bumped whenever a path that may have been skipped for being racy
+    /// enters `added`. A rebuild of added files runs only once per value, so
+    /// files the builder can never index (UTF-16 BOM, high-diversity,
+    /// unreadable) cannot trigger rebuilds forever.
     added_epoch: u64,
     /// When the current `added_epoch` was first seen. Waiting [`build::RACY_NS`]
     /// from here covers the newest added file, whose mtime is no later.
     added_since: Instant,
     /// The `added_epoch` value a rebuild last tried to index.
     added_rebuilt: u64,
+    /// Wall-clock start (unix ns) of the build that produced `index`, when
+    /// this process ran that build. The index header's `built_unix_ns` is
+    /// written at the end, so a file checked early in a long build could be
+    /// racy even below that later cutoff; the start is the safe bound.
+    build_started_ns: Option<i64>,
     /// Set while a reconcile holds the state lock. The watcher thread reads
     /// this lock-free and drops events instead of blocking on the lock and
     /// piling up an unbounded channel (a reconcile walks and stats the whole
@@ -237,21 +253,34 @@ impl State {
             added_epoch: 0,
             added_since: Instant::now(),
             added_rebuilt: 0,
+            build_started_ns: None,
             reconciling,
             missed,
             unprunable: false,
         }
     }
 
+    /// Record the start of the build that produced `index`, for an embedding
+    /// host that ran the build itself (see [`State::build_started_ns`]).
+    pub(crate) fn set_build_started_ns(&mut self, started: Option<i64>) {
+        self.build_started_ns = started;
+    }
+
     /// Live counters for `wg status`.
     pub(crate) fn text_stats(&self) -> serde_json::Value {
         let rebuild_pending = self.added_epoch != self.added_rebuilt;
+        let pending = if rebuild_pending {
+            self.added.values().filter(|a| a.pending).count()
+        } else {
+            0
+        };
+        let unindexed = self.added.len() - pending;
         serde_json::json!({
             "files": self.index.file_count(),
             "dirty": self.dirty,
             "added": self.added.len(),
-            "pending": if rebuild_pending { self.added.len() } else { 0 },
-            "unindexed": if rebuild_pending { 0 } else { self.added.len() },
+            "pending": pending,
+            "unindexed": unindexed,
             "needs_rescan": self.needs_rescan,
             "unprunable": self.unprunable,
             "walks": {
@@ -263,6 +292,30 @@ impl State {
                 "rebuild": self.walks.rebuild,
             },
         })
+    }
+
+    /// The mtime cutoff of the current index's racy window. A file older than
+    /// this was already outside the window when the index was written, so the
+    /// builder left it out for its content (binary, UTF-16 BOM, high-diversity,
+    /// unreadable), not for a race. Prefer the build start recorded by this
+    /// process; `built_unix_ns` in the header is the end time, which is later
+    /// and can only hide a racy skip. `None` when neither is known, so every
+    /// out-of-index file may be racy.
+    fn index_build_cutoff(&self) -> Option<i64> {
+        let built = self
+            .build_started_ns
+            .or_else(|| self.index.header.get("built_unix_ns").and_then(|v| v.as_i64()))?;
+        built.checked_sub(build::RACY_NS)
+    }
+
+    /// Whether an out-of-index file with `mtime_ns` could have been skipped
+    /// for being racy. Unknown mtime or build time stays pending, so it
+    /// rebuilds once rather than hiding a file the builder would index.
+    fn may_be_racy(cutoff: Option<i64>, mtime_ns: Option<i64>) -> bool {
+        match (cutoff, mtime_ns) {
+            (Some(cutoff), Some(mtime)) => mtime >= cutoff,
+            _ => true,
+        }
     }
 
     /// Whether the index's record for `id` matches `md` and a change `token`.
@@ -332,9 +385,10 @@ impl State {
 
     fn reconcile_walk(&mut self) -> anyhow::Result<()> {
         let index = self.index.clone();
+        let cutoff = self.index_build_cutoff();
         let n = index.file_count();
         let mut ids = vec![IdState { seq: 0, seen: false, current: false }; n];
-        let mut added: HashMap<String, u32> = HashMap::new();
+        let mut added: HashMap<String, Added> = HashMap::new();
         let mut dirty = 0usize;
         self.unprunable = false;
         let haystacks = self.args.haystack_builder();
@@ -384,15 +438,20 @@ impl State {
                     // Not in the index: either genuinely new, or deliberately
                     // excluded by the builder (binary, high-diversity, UTF-16
                     // BOM, racy). Both are searched directly as candidates.
-                    // `added_epoch` is bumped only when a path enters this set;
-                    // one rebuild attempt per epoch stops excluded files from
-                    // making the tree rebuild forever.
-                    added.insert(rel, seq);
+                    // A file older than the build's racy cutoff was already
+                    // excluded for its content, so only a possibly racy file
+                    // can make a rebuild due.
+                    let mtime = dent.metadata().ok().and_then(|md| build::mtime_ns(&md));
+                    let pending = Self::may_be_racy(cutoff, mtime);
+                    added.insert(rel, Added { seq, pending });
                 }
             }
             seq = seq.wrapping_add(1);
         }
-        if added.keys().any(|rel| !self.added.contains_key(rel)) {
+        let new_pending = added.iter().any(|(rel, a)| {
+            a.pending && !self.added.get(rel).is_some_and(|old| old.pending)
+        });
+        if new_pending {
             self.added_epoch = self.added_epoch.wrapping_add(1);
             self.added_since = Instant::now();
         }
@@ -438,11 +497,22 @@ impl State {
             // table (the scheduled rescan fixes the layout; meanwhile the
             // file must stay a candidate, which `added` guarantees).
             _ => {
-                if !self.added.contains_key(&rel) {
+                let pending = Self::may_be_racy(self.index_build_cutoff(), clock.mtime_ns);
+                if let Some(existing) = self.added.get_mut(&rel) {
+                    // A once-excluded file that was rewritten may now be
+                    // racy, and a later rebuild could index it.
+                    if pending && !existing.pending {
+                        existing.pending = true;
+                        self.added_epoch = self.added_epoch.wrapping_add(1);
+                        self.added_since = Instant::now();
+                    }
+                } else {
                     let seq = self.alloc_seq();
-                    self.added.insert(rel, seq);
-                    self.added_epoch = self.added_epoch.wrapping_add(1);
-                    self.added_since = Instant::now();
+                    self.added.insert(rel, Added { seq, pending });
+                    if pending {
+                        self.added_epoch = self.added_epoch.wrapping_add(1);
+                        self.added_since = Instant::now();
+                    }
                 }
             }
         }
@@ -567,10 +637,10 @@ impl State {
                 hits.push((st.seq, Hit::Id(id as u32)));
             }
         }
-        for (rel, seq) in &self.added {
+        for (rel, added) in &self.added {
             if let Some(rest) = rest_under(rel, prefix) {
                 total += 1;
-                hits.push((*seq, Hit::Added(rest.to_owned())));
+                hits.push((added.seq, Hit::Added(rest.to_owned())));
             }
         }
         // Candidates come back in rg's walk order.
@@ -1198,9 +1268,12 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
     watcher.watch(&root, RecursiveMode::Recursive)?;
 
     let usable = store::current(&root).is_some_and(|f| Index::open(&f).is_ok());
+    let mut built_now = false;
+    let build_started_ns = build::mtime_ns_now();
     if !usable {
         eprintln!("wgrep: no current index for {}, building one", root.display());
         rebuild(&args, &root, &root_arg)?;
+        built_now = true;
     }
     let index_file = store::current(&root).ok_or_else(|| anyhow::anyhow!("index missing after build"))?;
     let index = Arc::new(Index::open(&index_file)?);
@@ -1224,6 +1297,7 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
         added_epoch: 0,
         added_since: Instant::now(),
         added_rebuilt: 0,
+        build_started_ns: built_now.then_some(build_started_ns).flatten(),
         reconciling: reconciling.clone(),
         missed: missed.clone(),
         unprunable: false,
@@ -1657,8 +1731,8 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
         std::thread::sleep(Duration::from_secs(2));
         let (dirty, added_epoch, added_due) = {
             let s = state.read().unwrap();
-            let added_due = !s.added.is_empty()
-                && s.added_epoch != s.added_rebuilt
+            let added_due = s.added_epoch != s.added_rebuilt
+                && s.added.values().any(|added| added.pending)
                 && s.added_since.elapsed() >= Duration::from_nanos(build::RACY_NS as u64);
             (s.dirty, s.added_epoch, added_due)
         };
@@ -1666,6 +1740,7 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
             continue;
         }
         last = Instant::now();
+        let build_started_ns = build::mtime_ns_now();
         if let Err(err) = rebuild(&args, &root, &root_arg) {
             eprintln!("wgrep: rebuild failed: {err:#}");
             continue;
@@ -1675,6 +1750,7 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
             Ok(index) => {
                 let mut s = state.write().unwrap();
                 s.index = Arc::new(index);
+                s.build_started_ns = build_started_ns;
                 // One attempt per set of added files. Files the builder can
                 // never index stay candidates without forcing more rebuilds.
                 // Only record an attempt when the racy window had passed;
@@ -2091,10 +2167,77 @@ mod tests {
             added_epoch: 0,
             added_since: Instant::now(),
             added_rebuilt: 0,
+            build_started_ns: None,
             reconciling: Arc::new(AtomicBool::new(false)),
             missed: Arc::new(AtomicBool::new(false)),
             unprunable: false,
         }
+    }
+
+    /// An otherwise empty index whose header records when it was built, so a
+    /// reconcile can tell an old content exclusion from a racy skip.
+    fn empty_index_built_at(dir: &Path, built_unix_ns: i64) -> Arc<Index> {
+        let path = dir.join("unit-index-built.wgi");
+        let header = serde_json::json!({
+            "version": crate::index::format::VERSION,
+            "built_unix_ns": built_unix_ns,
+        });
+        let files: Vec<crate::index::format::FileEntry> = Vec::new();
+        let postings: Vec<std::io::Result<(u32, Vec<u32>, Vec<u8>)>> = Vec::new();
+        crate::index::format::write(&path, &header, &files, postings.into_iter(), 100).unwrap();
+        Arc::new(Index::open(&path).unwrap())
+    }
+
+    fn now_unix_ns() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap()
+    }
+
+    fn set_mtime_secs_ago(path: &Path, seconds: u64) {
+        let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn old_excluded_file_is_unindexed_without_a_rebuild_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let bom = root.join("bom.rs");
+        std::fs::write(&bom, [0xFF, 0xFE, b'f', 0, b'n', 0]).unwrap();
+        set_mtime_secs_ago(&bom, 60);
+
+        let mut state = state_for(&root, empty_index_built_at(store.path(), now_unix_ns()));
+        state.needs_rescan = true;
+        state.reconcile().unwrap();
+
+        let stats = state.text_stats();
+        assert_eq!(stats["added"].as_u64(), Some(1), "{stats}");
+        assert_eq!(stats["pending"].as_u64(), Some(0), "{stats}");
+        assert_eq!(stats["unindexed"].as_u64(), Some(1), "{stats}");
+        assert_eq!(state.added_epoch, 0, "a content exclusion must not bump the epoch");
+        assert!(!state.added["bom.rs"].pending);
+
+        // A normal file written now may have been skipped for being racy, so
+        // it asks for exactly one rebuild.
+        std::fs::write(root.join("fresh.rs"), "fn fresh() {}\n").unwrap();
+        state.needs_rescan = true;
+        state.reconcile().unwrap();
+
+        let stats = state.text_stats();
+        assert_eq!(stats["pending"].as_u64(), Some(1), "{stats}");
+        assert_eq!(stats["unindexed"].as_u64(), Some(1), "{stats}");
+        assert_eq!(state.added_epoch, 1);
     }
 
     /// A running text event loop for tests that need to feed real events.

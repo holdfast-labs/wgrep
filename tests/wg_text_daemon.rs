@@ -315,6 +315,25 @@ fn has(output: &[u8], needle: &str) -> bool {
         .contains(needle)
 }
 
+fn set_mtime_secs_ago(path: &std::path::Path, seconds: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn text_status(scratch: &Scratch) -> serde_json::Value {
+    let mut status = wg_command(scratch);
+    status.args(["status", "--json"]);
+    let status = run_bounded(status, 60);
+    assert!(status.status.success(), "status failed");
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
+    value["roots"][0]["text"].clone()
+}
+
 #[test]
 fn fresh_repo_counts_every_file_in_the_text_status() {
     let scratch = Scratch::new("fresh-count");
@@ -354,24 +373,41 @@ fn fresh_repo_counts_every_file_in_the_text_status() {
 }
 
 #[test]
-fn fresh_repo_reports_unindexable_files_without_staying_building() {
+fn old_unindexable_file_is_unindexed_without_a_rebuild() {
     let scratch = Scratch::new("fresh-unindexed");
     scratch.write("src/a.rs", "fn alpha() { let needle = 1; }\n");
     scratch.write("src/b.rs", "fn beta() { let other = 2; }\n");
     // The builder never indexes a UTF-16 BOM file, because rg transcodes it.
-    std::fs::write(scratch.root.join("bom.rs"), [0xFF, 0xFE, b'f', 0, b'n', 0]).unwrap();
+    let bom = scratch.root.join("bom.rs");
+    std::fs::write(&bom, [0xFF, 0xFE, b'f', 0, b'n', 0]).unwrap();
+    // Move every file outside the racy window, so the build's exclusion of
+    // the BOM file is a content decision, not a race.
+    for rel in ["src/a.rs", "src/b.rs", "bom.rs"] {
+        set_mtime_secs_ago(&scratch.root.join(rel), 60);
+    }
 
     let _daemon = Daemon::start(&scratch, &[]);
+
+    // One read, no wait: no rebuild is due just to learn the BOM file is
+    // unindexable.
+    let text = text_status(&scratch);
+    assert_eq!(text["files"].as_u64(), Some(3), "{text}");
+    assert_eq!(text["indexed"].as_u64(), Some(2), "{text}");
+    assert_eq!(text["pending"].as_u64(), Some(0), "{text}");
+    assert_eq!(text["unindexed"].as_u64(), Some(1), "{text}");
+    assert_eq!(text["building"], false, "{text}");
+
+    // A freshly written normal file is racy: it goes pending, then the one
+    // rebuild due for it indexes it.
+    scratch.write("fresh.rs", "fn fresh() { let needle = 5; }\n");
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_pending = false;
     loop {
-        let mut status = wg_command(&scratch);
-        status.args(["status", "--json"]);
-        let status = run_bounded(status, 60);
-        assert!(status.status.success());
-        let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
-        let text = &value["roots"][0]["text"];
-        assert_eq!(text["files"].as_u64(), Some(3), "wrong total: {text}");
-        if text["indexed"].as_u64() == Some(2)
+        // A query reconciles the file set; status alone only reads it.
+        let _ = daemon_query(&scratch);
+        let text = text_status(&scratch);
+        saw_pending |= text["pending"].as_u64() == Some(1);
+        if text["indexed"].as_u64() == Some(3)
             && text["pending"].as_u64() == Some(0)
             && text["unindexed"].as_u64() == Some(1)
             && text["building"] == false
@@ -380,10 +416,11 @@ fn fresh_repo_reports_unindexable_files_without_staying_building() {
         }
         assert!(
             Instant::now() < deadline,
-            "unindexable file kept the text index building: {text}"
+            "the fresh file never settled: {text}"
         );
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(150));
     }
+    assert!(saw_pending, "a fresh file must be pending before it is indexed");
 }
 
 #[test]

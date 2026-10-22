@@ -85,6 +85,9 @@ impl TextIndex {
             .unwrap_or_else(|| walk_spelling(&root));
         let walk_root = store::absolute(&root_arg, cwd);
         let mut built = false;
+        // Taken before the walk: a file modified after this point can be
+        // skipped as racy, so it must stay pending for the next rebuild.
+        let build_started_ns = build::mtime_ns_now();
         let index_file = match store::current(&walk_root) {
             Some(file) if Index::open(&file).is_ok() => file,
             _ => {
@@ -123,6 +126,9 @@ impl TextIndex {
             reconciling,
             missed,
         )));
+        if built {
+            state.write().unwrap().set_build_started_ns(build_started_ns);
+        }
         {
             let (state, pending, health, root, rx) =
                 (state.clone(), pending.clone(), health.clone(), walk_root.clone(), rx);
