@@ -129,6 +129,10 @@ jobs:
       - name: Run library and binary tests
         run: cargo test --locked --lib --bins --test wg_macos_fsevents
 
+      - name: Show the non-UTF-8 watcher result
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --test wg_macos_fsevents -- --exact non_utf8_file_name_does_not_panic_the_watcher --nocapture
+
       - name: Run parity tests against rg 15.1.0
         if: ${{ !cancelled() }}
         run: cargo test --locked --test wg_lexical_parity --test wg_source_files_parity

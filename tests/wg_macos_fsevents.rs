@@ -27,6 +27,14 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
+        Scratch::create(name, None)
+    }
+
+    fn at(name: &str, root: PathBuf) -> Scratch {
+        Scratch::create(name, Some(root))
+    }
+
+    fn create(name: &str, root: Option<PathBuf>) -> Scratch {
         let base = std::env::var_os("WG_TEST_TMP")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
@@ -36,12 +44,13 @@ impl Scratch {
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("root")).unwrap();
+        let root = root.unwrap_or_else(|| base.join("root"));
+        std::fs::create_dir_all(&root).unwrap();
         for dir in ["service", "indexes"] {
             std::fs::create_dir_all(base.join(dir)).unwrap();
         }
         Scratch {
-            root: base.join("root"),
+            root,
             service: base.join("service"),
             indexes: base.join("indexes"),
             events: base.join("events.ndjson"),
@@ -98,30 +107,35 @@ fn read_pipe<R: Read + Send + 'static>(mut reader: R, seconds: u64) -> Vec<u8> {
         .unwrap_or_else(|_| panic!("pipe did not reach EOF within {seconds}s"))
 }
 
-fn run_bounded(mut command: Command, seconds: u64) -> Outcome {
+fn run_optional(mut command: Command, seconds: u64) -> Option<Outcome> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn");
+    let mut child = command.spawn().ok()?;
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
-        if let Some(status) = child.try_wait().expect("try_wait") {
-            let stdout = read_pipe(child.stdout.take().unwrap(), 10);
-            let stderr = read_pipe(child.stderr.take().unwrap(), 10);
-            return Outcome {
+        if let Some(status) = child.try_wait().ok()? {
+            let stdout = read_pipe(child.stdout.take()?, 10);
+            let stderr = read_pipe(child.stderr.take()?, 10);
+            return Some(Outcome {
                 status,
                 stdout,
                 stderr,
-            };
+            });
         }
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("command did not exit within {seconds}s");
+            return None;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn run_bounded(command: Command, seconds: u64) -> Outcome {
+    run_optional(command, seconds)
+        .unwrap_or_else(|| panic!("command did not exit within {seconds}s"))
 }
 
 fn run_bounded_quiet(mut command: Command, seconds: u64) -> std::io::Result<()> {
@@ -372,40 +386,132 @@ fn rename_over_existing_path_replaces_the_file() {
     assert!(!has(&listed, "a.rs"));
 }
 
-#[test]
-fn non_utf8_file_name_does_not_panic_the_watcher() {
+/// Runs the non-UTF-8 case on `scratch`. Returns false when the filesystem
+/// rejects the file name.
+fn non_utf8_case(scratch: &Scratch) -> bool {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
-    let scratch = Scratch::new("non-utf8");
     let path = scratch
         .root
         .join(OsString::from_vec(b"bad-\xff.rs".to_vec()));
-    if std::fs::write(&path, "fn wg_macos_non_utf8_symbol() { let needle = 1; }\n").is_err() {
-        eprintln!("skipping: filesystem rejects non-UTF-8 file names");
-        return;
+    if let Err(error) = std::fs::write(&path, "fn wg_macos_non_utf8_symbol() { let needle = 1; }\n")
+    {
+        eprintln!("non-UTF-8 file name rejected: {error}");
+        return false;
     }
     std::thread::sleep(Duration::from_millis(2300));
-    let _daemon = Daemon::start(&scratch);
+    let _daemon = Daemon::start(scratch);
 
-    assert!(daemon_is_alive(&scratch), "the service stopped after wg up");
+    assert!(daemon_is_alive(scratch), "the service stopped after wg up");
     assert_eq!(
-        search(&scratch, "wg_macos_non_utf8_symbol"),
-        full_scan(&scratch, "wg_macos_non_utf8_symbol"),
+        search(scratch, "wg_macos_non_utf8_symbol"),
+        full_scan(scratch, "wg_macos_non_utf8_symbol"),
         "the daemon result must equal the full scan"
     );
 
     std::fs::write(&path, "fn wg_macos_non_utf8_symbol() { let needle = 2; }\n").unwrap();
-    let expected = full_scan(&scratch, "wg_macos_non_utf8_symbol");
+    let expected = full_scan(scratch, "wg_macos_non_utf8_symbol");
     let output = query_until(
-        &scratch,
+        scratch,
         "wg_macos_non_utf8_symbol",
         |out| out == expected.as_slice(),
         10,
     );
     assert_eq!(output, expected);
     assert!(
-        daemon_is_alive(&scratch),
+        daemon_is_alive(scratch),
         "the watcher panicked on a non-UTF-8 event path"
     );
+    true
+}
+
+/// A small HFS+ image mounted at a known path. Some runner filesystems reject
+/// non-UTF-8 names, so the test uses this image when it runs in CI.
+struct HfsVolume {
+    dir: PathBuf,
+    mount: PathBuf,
+}
+
+impl HfsVolume {
+    fn new() -> Option<HfsVolume> {
+        let dir = std::env::temp_dir().join(format!(
+            "wg-macos-hfs-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let image = dir.join("volume.dmg");
+        let mount = dir.join("mnt");
+        std::fs::create_dir_all(&mount).ok()?;
+        let ok = |command: Command| run_optional(command, 120).map(|out| out.status.success());
+
+        let mut create = Command::new("hdiutil");
+        create
+            .args([
+                "create", "-quiet", "-size", "16m", "-fs", "HFS+", "-volname", "wgmacos",
+            ])
+            .arg(&image);
+        if ok(create) != Some(true) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        }
+
+        let mut attach = Command::new("hdiutil");
+        attach
+            .args([
+                "attach",
+                "-quiet",
+                "-nobrowse",
+                "-noverify",
+                "-readwrite",
+                "-mountpoint",
+            ])
+            .arg(&mount)
+            .arg(&image);
+        if ok(attach) != Some(true) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        }
+        Some(HfsVolume { dir, mount })
+    }
+
+    fn root(&self) -> PathBuf {
+        self.mount.join("root")
+    }
+}
+
+impl Drop for HfsVolume {
+    fn drop(&mut self) {
+        let mut detach = Command::new("hdiutil");
+        detach.args(["detach", "-quiet", "-force"]).arg(&self.mount);
+        let _ = run_optional(detach, 120);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn non_utf8_file_name_does_not_panic_the_watcher() {
+    let direct = Scratch::new("non-utf8");
+    if non_utf8_case(&direct) {
+        eprintln!("non-UTF-8 file name accepted by the runner filesystem");
+        return;
+    }
+    drop(direct);
+
+    if std::env::var_os("CI").is_none() {
+        eprintln!(
+            "skipping: filesystem rejects non-UTF-8 file names (set CI=true for an HFS+ image)"
+        );
+        return;
+    }
+    let Some(volume) = HfsVolume::new() else {
+        eprintln!("skipping: HFS+ fallback image is unavailable");
+        return;
+    };
+    let fallback = Scratch::at("non-utf8-hfs", volume.root());
+    if non_utf8_case(&fallback) {
+        eprintln!("non-UTF-8 file name accepted by the HFS+ fallback");
+        return;
+    }
+    eprintln!("skipping: HFS+ fallback also rejects non-UTF-8 file names");
 }
