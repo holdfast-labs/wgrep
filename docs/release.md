@@ -93,6 +93,29 @@ The archive also contains `README.md`, `docs/`, `licenses/`, `PROVENANCE/`, and
 `third_party/ripgrep/` and `crates/wisp-grep/`, because the ripgrep source is
 part of the `wg` build.
 
+## Dependency licenses
+
+`scripts/wg_release.py archive` runs `cargo metadata --locked` on the exported
+source with the archive target platform. That gives the exact compiled package
+set and each package's `manifest_path`, including path crates such as
+`crates/wisp-grep` and `vendor/notify`.
+
+For every compiled crate, the script copies the license files from the package
+manifest directory into `licenses/deps/<name>-<version>/`. It writes
+`licenses/DEPENDENCY_LICENSES.txt` with the crate, version, license expression,
+and copied file names. The archive step fails if a compiled crate has no local
+license file. The only exceptions are a verified upstream fallback or an entry
+in the reviewed `LICENSE_ALLOWLIST` in the script.
+
+Two published crates ship no license file: `number_prefix` 0.4.0 and
+`tree-sitter-language-pack` 1.21.0. For those, the script embeds the upstream
+MIT text and checks its pinned SHA-256 before writing it. The index marks these
+entries as a verified upstream fallback.
+
+The registry path is resolved automatically from `CARGO_HOME` or
+`~/.cargo/registry/src`. `--cargo-registry` remains available as an explicit
+override but the release workflow does not need it.
+
 ## Pinned ripgrep parity reference
 
 The release workflow downloads the official ripgrep 15.1.0 asset and pins its

@@ -107,6 +107,70 @@ LICENSE_NAME_RE = re.compile(
     r"^(license|licence|copying|copyright|unlicense|notice)([-._].*)?$", re.IGNORECASE
 )
 
+# Two published crates omit their own license file. Their upstream license
+# text is embedded here verbatim, with a pinned SHA-256, so the archive still
+# carries the notice required by the MIT terms. The hash is checked before use.
+NUMBER_PREFIX_LICENCE = """MIT License
+
+Copyright (c) 2018 Benjamin Sago
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+TREE_SITTER_LANGUAGE_PACK_LICENSE = """Copyright 2025-2026 Kreuzberg, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
+
+LICENSE_FALLBACKS = {
+    ("number_prefix", "0.4.0"): {
+        "filename": "LICENCE",
+        "url": "https://github.com/ogham/rust-number-prefix/blob/master/LICENCE",
+        "sha256": "df8d11b64ecce43b1229cd72745c59513b54ba39f05e3ec7c06780617b7b1fcc",
+        "text": NUMBER_PREFIX_LICENCE,
+    },
+    ("tree-sitter-language-pack", "1.21.0"): {
+        "filename": "LICENSE",
+        "url": "https://github.com/xberg-io/tree-sitter-language-pack/blob/main/LICENSE",
+        "sha256": "a072c04f582d847b35e348b4160e7845b753cce4503783320717b3c69416e207",
+        "text": TREE_SITTER_LANGUAGE_PACK_LICENSE,
+    },
+}
+
+# Reviewed exceptions for compiled crates that ship no local license file.
+# Keep this empty unless the license text is genuinely unavailable, and give a
+# reason that a maintainer can audit. Keys are (crate name, version).
+LICENSE_ALLOWLIST = {
+    # ("crate-name", "0.0.0"): "reason the local license file is unavailable",
+}
+
+PLATFORM_TARGETS = {
+    "windows-x64": "x86_64-pc-windows-msvc",
+    "windows-arm64": "aarch64-pc-windows-msvc",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
+}
+
 DEFAULT_WORK = Path("E:/wgrep-worktrees/wg-release-20261018")
 DEFAULT_REGISTRY_CANDIDATES = [
     Path("E:/wgrep-worktrees/wg-up-20261018/cargo-home/registry/src"),
@@ -471,103 +535,244 @@ def parse_wg_version(version_line: str):
 
 
 def resolve_registry(explicit):
+    """Return a Cargo registry source directory, or None.
+
+    ``cargo metadata`` gives the authoritative source path for each package, so
+    this is only recorded for provenance and used as a fallback. The important
+    fix is the ``~/.cargo/registry/src`` fallback: CARGO_HOME is often unset
+    even when Cargo uses that directory.
+    """
     if explicit:
-        return Path(explicit)
-    for cand in DEFAULT_REGISTRY_CANDIDATES:
-        if cand.is_dir():
-            return cand
+        path = Path(explicit)
+        if not path.is_dir():
+            raise ReleaseError(f"--cargo-registry is not a directory: {path}")
+        return path
+    candidates = []
     cargo_home = os.environ.get("CARGO_HOME")
     if cargo_home:
-        cand = Path(cargo_home) / "registry" / "src"
+        candidates.append(Path(cargo_home) / "registry" / "src")
+    candidates.append(Path.home() / ".cargo" / "registry" / "src")
+    candidates.extend(DEFAULT_REGISTRY_CANDIDATES)
+    seen = set()
+    for cand in candidates:
+        key = str(cand.resolve()) if cand.exists() else str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
         if cand.is_dir():
             return cand
     return None
 
 
-def cargo_lock_packages(lock_path: Path):
-    packages = []
-    name = version = None
-    section = False
-    for line in lock_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = line.strip()
-        if s.startswith("[[package]]"):
-            if name and version:
-                packages.append((name, version))
-            name = version = None
-            section = True
-            continue
-        if s.startswith("[") and not s.startswith("[[package]]"):
-            if name and version:
-                packages.append((name, version))
-            name = version = None
-            section = False
-            continue
-        if section and s.startswith("name = "):
-            name = s.split("=", 1)[1].strip().strip('"')
-        elif section and s.startswith("version = "):
-            version = s.split("=", 1)[1].strip().strip('"')
-    if name and version:
-        packages.append((name, version))
-    return packages
+def cargo_metadata(export_dir: Path, platform: str | None):
+    argv = ["cargo", "metadata", "--locked", "--format-version", "1"]
+    target = PLATFORM_TARGETS.get(platform or "")
+    if target:
+        argv.extend(["--filter-platform", target])
+    code, out, err = run_capture(argv, cwd=export_dir, timeout=900)
+    detail = (err or out).decode("utf-8", "replace").strip()
+    if code != 0 or not out:
+        raise ReleaseError(
+            f"cargo metadata failed in {export_dir} (exit {code}): {detail}"
+        )
+    try:
+        return json.loads(out)
+    except ValueError as exc:
+        raise ReleaseError(f"cargo metadata returned invalid JSON: {exc}") from exc
 
 
-def collect_dependency_licenses(lock_path: Path, registry_src, dest_dir: Path):
+@dataclasses.dataclass(frozen=True)
+class LicensePackage:
+    name: str
+    version: str
+    license: str | None
+    license_file: str | None
+    manifest_path: Path
+
+
+def compiled_license_packages(export_dir: Path, platform: str | None):
+    """Return the non-dev packages reachable from the workspace root.
+
+    ``cargo metadata`` resolves path and vendored crates to their real
+    ``manifest_path``, so it covers ``crates/wisp-grep`` and ``vendor/notify``
+    without guessing from Cargo.lock.
+    """
+    doc = cargo_metadata(export_dir, platform)
+    packages = {p["id"]: p for p in doc.get("packages", [])}
+    resolve = doc.get("resolve") or {}
+    nodes = {n["id"]: n for n in resolve.get("nodes", [])}
+    roots = list(doc.get("workspace_members") or [])
+    if not roots:
+        roots = [
+            p["id"] for p in doc.get("packages", [])
+            if Path(p.get("manifest_path", "")).parent == export_dir
+        ]
+    include = set()
+    stack = list(roots)
+    while stack:
+        pkg_id = stack.pop()
+        if pkg_id in include or pkg_id not in packages:
+            continue
+        include.add(pkg_id)
+        node = nodes.get(pkg_id)
+        if not node:
+            continue
+        for dep in node.get("deps", []):
+            kinds = dep.get("dep_kinds") or [{}]
+            if kinds and all(kind.get("kind") == "dev" for kind in kinds):
+                continue
+            stack.append(dep["pkg"])
+    result = []
+    for pkg_id in include:
+        pkg = packages[pkg_id]
+        result.append(LicensePackage(
+            name=pkg["name"],
+            version=pkg["version"],
+            license=pkg.get("license"),
+            license_file=pkg.get("license_file"),
+            manifest_path=Path(pkg["manifest_path"]),
+        ))
+    result.sort(key=lambda pkg: (pkg.name.lower(), pkg.version))
+    return result
+
+
+def license_files_for(pkg: LicensePackage):
+    manifest_dir = pkg.manifest_path.parent
+    found = []
+    if pkg.license_file:
+        path = Path(pkg.license_file)
+        if not path.is_absolute():
+            path = manifest_dir / path
+        if path.is_file():
+            found.append(path)
+    if not found:
+        for entry in sorted(manifest_dir.iterdir()):
+            if entry.is_file() and LICENSE_NAME_RE.match(entry.name):
+                found.append(entry)
+            elif entry.is_dir() and entry.name.upper() in {
+                "LICENSE", "LICENCES", "LICENCE", "COPYING"
+            }:
+                found.extend(
+                    item for item in sorted(entry.rglob("*")) if item.is_file()
+                )
+    seen = set()
+    unique = []
+    for path in found:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def collect_dependency_licenses(export_dir: Path, dest_dir: Path,
+                                platform: str | None, registry_src):
     dest_dir.mkdir(parents=True, exist_ok=True)
-    packages = cargo_lock_packages(lock_path)
+    packages = compiled_license_packages(export_dir, platform)
+    target = PLATFORM_TARGETS.get(platform or "")
     index = [
         "Dependency license notices",
         "===========================",
         "",
         f"created_utc: {utc_now()}",
-        f"cargo_lock: {lock_path}",
-        f"registry_src: {registry_src}",
-        f"packages_in_lock: {len(packages)}",
+        f"export: {export_dir}",
+        f"source: cargo metadata --locked" + (f" --filter-platform {target}" if target else ""),
+        f"registry_src: {registry_src if registry_src else 'auto (metadata manifest paths)'}",
+        f"compiled_packages: {len(packages)}",
         "",
-        "These files are copied verbatim from the local Cargo registry source",
-        "cache that resolved this lockfile. No license text is invented. A",
-        "package is listed as 'unavailable' when its source copy is missing.",
+        "These files are copied verbatim from each package's manifest directory,",
+        "including Cargo registry, path, and vendored crates. No license text is",
+        "invented. Every compiled crate must have a local license file unless it",
+        "is named in the reviewed allowlist in scripts/wg_release.py.",
         "",
     ]
+    records = []
+    missing = []
     copied = 0
-    unavailable = []
-    for name, version in sorted(set(packages)):
-        src_dir = None
-        if registry_src:
-            base = Path(registry_src)
-            for index_dir in sorted(base.iterdir()) if base.is_dir() else []:
-                cand = index_dir / f"{name}-{version}"
-                if cand.is_dir():
-                    src_dir = cand
-                    break
-        if src_dir is None:
-            unavailable.append(f"{name}-{version}")
+    allowlisted = 0
+    fallbacked = 0
+    for pkg in packages:
+        files = license_files_for(pkg)
+        if not files:
+            key = (pkg.name, pkg.version)
+            fallback = LICENSE_FALLBACKS.get(key)
+            if fallback:
+                text = fallback["text"]
+                digest = sha256_bytes(text.encode("utf-8"))
+                if digest != fallback["sha256"]:
+                    raise ReleaseError(
+                        f"embedded license text hash mismatch for {pkg.name} "
+                        f"{pkg.version}: expected {fallback['sha256']}, got {digest}"
+                    )
+                crate_dir = dest_dir / f"{pkg.name}-{pkg.version}"
+                crate_dir.mkdir(parents=True, exist_ok=True)
+                name = fallback["filename"]
+                (crate_dir / name).write_text(text, encoding="utf-8", newline="\n")
+                fallbacked += 1
+                records.append((pkg, [name], "fallback", fallback["url"]))
+                continue
+            reason = LICENSE_ALLOWLIST.get(key)
+            if reason:
+                allowlisted += 1
+                records.append((pkg, [], "allowlisted", reason))
+            else:
+                missing.append(
+                    f"{pkg.name} {pkg.version} ({pkg.license or 'no license expression'})"
+                )
+                records.append((pkg, [], "missing", ""))
             continue
-        found = [
-            p for p in sorted(src_dir.iterdir())
-            if p.is_file() and LICENSE_NAME_RE.match(p.name)
-        ]
-        if not found:
-            unavailable.append(f"{name}-{version}")
-            continue
-        crate_dest = dest_dir / f"{name}-{version}"
-        crate_dest.mkdir(parents=True, exist_ok=True)
-        for p in found:
-            shutil.copyfile(p, crate_dest / p.name)
-        index.append(f"  {name}-{version}: " + ", ".join(p.name for p in found))
+        crate_dir = dest_dir / f"{pkg.name}-{pkg.version}"
+        crate_dir.mkdir(parents=True, exist_ok=True)
+        copied_files = []
+        for path in files:
+            try:
+                rel = path.relative_to(pkg.manifest_path.parent)
+            except ValueError:
+                rel = Path(path.name)
+            dest = crate_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest)
+            copied_files.append(rel_norm(rel))
         copied += 1
+        records.append((pkg, copied_files, "copied", ""))
+
+    for pkg, files, status, reason in records:
+        index.append(f"{pkg.name} {pkg.version}: {pkg.license or 'no license expression'}")
+        if files:
+            for name in files:
+                index.append(f"  - {name}")
+            if status == "fallback":
+                index.append(f"  upstream fallback (sha256 checked): {reason}")
+        elif status == "allowlisted":
+            index.append(f"  allowlisted: {reason}")
+        elif status == "missing":
+            index.append("  MISSING: no local license file found")
     index.append("")
     index.append(f"packages_with_license_copied: {copied}")
-    index.append(f"packages_unavailable: {len(unavailable)}")
-    if unavailable:
+    index.append(f"packages_from_verified_upstream_fallback: {fallbacked}")
+    index.append(f"packages_allowlisted: {allowlisted}")
+    index.append(f"packages_missing: {len(missing)}")
+    if missing:
         index.append("")
-        index.append("unavailable (no local registry source copy; not fabricated):")
-        for item in unavailable:
+        index.append("missing license files (archive refused):")
+        for item in missing:
             index.append(f"  {item}")
     index.append("")
     (dest_dir.parent / "DEPENDENCY_LICENSES.txt").write_text(
         "\n".join(index), encoding="utf-8", newline="\n"
     )
-    return copied, len(unavailable)
+    if missing:
+        raise ReleaseError(
+            "missing license files for compiled crates: "
+            + ", ".join(missing)
+            + "; add the files or extend LICENSE_ALLOWLIST with a reviewed reason"
+        )
+    return {
+        "compiled_packages": len(packages),
+        "packages_copied": copied,
+        "packages_fallback": fallbacked,
+        "packages_allowlisted": allowlisted,
+    }
 
 
 def tree_add(tf, path: Path, arcname: str, mode=0o644):
@@ -648,8 +853,8 @@ def stage_archive(binary_wg: Path, export, platform, version, build_id,
         )
 
     registry = resolve_registry(cargo_registry)
-    copied, unavailable = collect_dependency_licenses(
-        core / "Cargo.lock", registry, root / "licenses" / "deps"
+    license_stats = collect_dependency_licenses(
+        core, root / "licenses" / "deps", platform, registry
     )
 
     shutil.copytree(core, root / "source", ignore=_source_copy_ignore(core))
@@ -695,8 +900,14 @@ def stage_archive(binary_wg: Path, export, platform, version, build_id,
         },
         "dependency_licenses": {
             "registry_src": str(registry) if registry else None,
-            "packages_copied": copied,
-            "packages_unavailable": unavailable,
+            "source": "cargo metadata --locked" + (
+                f" --filter-platform {PLATFORM_TARGETS[platform]}"
+                if platform in PLATFORM_TARGETS else ""
+            ),
+            "compiled_packages": license_stats["compiled_packages"],
+            "packages_copied": license_stats["packages_copied"],
+            "packages_fallback": license_stats["packages_fallback"],
+            "packages_allowlisted": license_stats["packages_allowlisted"],
         },
         "text_engine": {
             "entrypoint": f"bin/{wg_name}",
@@ -1132,21 +1343,37 @@ class SelfTest:
         return 0 if ok else 2
 
 
-def make_mini_repo(base: Path, symlink=False, sensitive=False):
+def make_mini_repo(base: Path, symlink=False, sensitive=False,
+                   missing_license=False):
     (base / "src").mkdir(parents=True)
     (base / "tests").mkdir()
     (base / "docs").mkdir()
     (base / "docs" / "launch").mkdir()
     (base / "target").mkdir()
     (base / "__pycache__").mkdir()
-    (base / "Cargo.toml").write_text(
-        '[package]\nname = "wgrep"\nversion = "9.9.9"\n', encoding="utf-8"
+    cargo_toml = (
+        '[package]\nname = "wgrep"\nversion = "9.9.9"\nlicense = "MIT"\n\n'
+        '[workspace]\n'
     )
-    (base / "Cargo.lock").write_text(
-        '[[package]]\nname = "memmap2"\nversion = "0.9.9"\n\n'
-        '[[package]]\nname = "example"\nversion = "1.0.0"\n',
-        encoding="utf-8",
+    cargo_lock = (
+        'version = 4\n\n'
+        '[[package]]\nname = "wgrep"\nversion = "9.9.9"\n'
     )
+    if missing_license:
+        cargo_toml += (
+            '\n[dependencies]\n'
+            'wisp-grep = { path = "crates/wisp-grep" }\n'
+        )
+        cargo_lock = (
+            'version = 4\n\n'
+            '[[package]]\nname = "wgrep"\nversion = "9.9.9"\n'
+            'dependencies = [\n "wisp-grep",\n]\n\n'
+            '[[package]]\nname = "wisp-grep"\nversion = "0.1.0"\n'
+            'dependencies = [\n "nolicense",\n]\n\n'
+            '[[package]]\nname = "nolicense"\nversion = "0.1.0"\n'
+        )
+    (base / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+    (base / "Cargo.lock").write_text(cargo_lock, encoding="utf-8")
     (base / "src" / "lib.rs").write_text("pub fn x() {}\n", encoding="utf-8")
     (base / "src" / "bin").mkdir()
     (base / "src" / "bin" / "wg.rs").write_text("fn main() {}\n", encoding="utf-8")
@@ -1175,12 +1402,30 @@ def make_mini_repo(base: Path, symlink=False, sensitive=False):
     wisp = base / "crates" / "wisp-grep"
     (wisp / "src").mkdir(parents=True)
     (wisp / "target").mkdir()
-    (wisp / "Cargo.toml").write_text(
-        '[package]\nname = "wisp-grep"\nversion = "0.1.0"\n', encoding="utf-8"
+    wisp_toml = '[package]\nname = "wisp-grep"\nversion = "0.1.0"\n'
+    wisp_lock = (
+        'version = 4\n\n'
+        '[[package]]\nname = "wisp-grep"\nversion = "0.1.0"\n'
     )
-    (wisp / "Cargo.lock").write_text(
-        '[[package]]\nname = "wisp-grep"\nversion = "0.1.0"\n', encoding="utf-8"
-    )
+    if missing_license:
+        wisp_toml += '\n[dependencies]\nnolicense = { path = "nolicense" }\n'
+        wisp_lock = (
+            'version = 4\n\n'
+            '[[package]]\nname = "wisp-grep"\nversion = "0.1.0"\n'
+            'dependencies = [\n "nolicense",\n]\n\n'
+            '[[package]]\nname = "nolicense"\nversion = "0.1.0"\n'
+        )
+        nolicense = wisp / "nolicense"
+        (nolicense / "src").mkdir(parents=True)
+        (nolicense / "Cargo.toml").write_text(
+            '[package]\nname = "nolicense"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        (nolicense / "src" / "lib.rs").write_text(
+            "pub fn no_license() {}\n", encoding="utf-8"
+        )
+    (wisp / "Cargo.toml").write_text(wisp_toml, encoding="utf-8")
+    (wisp / "Cargo.lock").write_text(wisp_lock, encoding="utf-8")
     (wisp / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
     (wisp / "src" / "lib.rs").write_text("pub fn rg() {}\n", encoding="utf-8")
     (wisp / "LICENSE-MIT").write_text("MIT test\n", encoding="utf-8")
@@ -1369,6 +1614,8 @@ def run_self_test(args):
                 f"{root}/licenses/wisp-grep-LICENSE-MIT",
                 f"{root}/licenses/wisp-grep-UNLICENSE",
                 f"{root}/licenses/wisp-grep-COPYING",
+                f"{root}/licenses/DEPENDENCY_LICENSES.txt",
+                f"{root}/licenses/deps/wgrep-9.9.9/LICENSE",
                 f"{root}/source/crates/wisp-grep/Cargo.toml",
                 f"{root}/source/crates/wisp-grep/src/lib.rs",
                 f"{root}/PROVENANCE/BUILD_INFO.json",
@@ -1392,7 +1639,30 @@ def run_self_test(args):
             assert list(info["binaries"]) == ["wg"], "archive must ship only wg"
             assert info["text_engine"]["external_rg_required"] is False
             assert info["text_engine"]["wg_rg_env_read"] is False
+            deps = info["dependency_licenses"]
+            assert deps["compiled_packages"] >= 1, deps
+            assert deps["packages_copied"] >= 1, deps
+            assert deps["packages_allowlisted"] == 0, deps
         return ("PASS", f"{len(names)} archive entries verified")
+
+    def case_missing_license():
+        repo = make_mini_repo(sandbox / "r-license", missing_license=True)
+        export = export_tree(repo, sandbox / "o-license")
+        wg = fake_binary(sandbox / "wg-pe-license", "PE")
+        out = sandbox / "a-license.zip"
+        ns = argparse.Namespace(
+            work=str(sandbox / "aw-license"), wg=str(wg), platform="auto",
+            export=str(export.out_dir), repo=str(repo), version="9.9.9",
+            build_id="license", out=str(out), force=True,
+            binary_status="self-test-fixture", cargo_registry=None, json=False,
+        )
+        try:
+            cmd_archive(ns)
+        except ReleaseError as exc:
+            assert not out.exists(), "archive was written despite a missing license"
+            assert "nolicense" in str(exc), exc
+            return ("PASS", f"refused archive before pack: {exc}")
+        return ("FAIL", "archive accepted a compiled crate with no license file")
 
     def case_magic_mismatch():
         repo = make_mini_repo(sandbox / "r8")
@@ -1497,6 +1767,7 @@ def run_self_test(args):
         ("forced export refuses unowned output", case_force_unowned),
         ("export refuses non-empty output dir", case_nonempty),
         ("archive ships only wg plus source and notices", case_archive_paths),
+        ("archive fails when a compiled crate has no license", case_missing_license),
         ("archive refuses OS/label mismatch", case_magic_mismatch),
         ("archive rejects removed --rg option", case_archive_rejects_rg),
         ("archive fails on missing --wg", case_missing_binary),
