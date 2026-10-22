@@ -66,6 +66,12 @@ semantic = ["half", "safetensors", "tokenizers", "ureq", "sha2", "tree-sitter", 
 [dev-dependencies]
 tempfile = "3"
 
+# The default build keeps notify without optional backends on Linux and
+# Windows. macOS has no built-in backend then: FSEvents is the only native
+# choice, so enable its feature for that target only.
+[target.'cfg(target_os = "macos")'.dependencies]
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+
 # Used by `detached.rs` to close inherited descriptors on Unix.
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.177"
