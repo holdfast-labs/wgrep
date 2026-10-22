@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt;
 use std::os::raw;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -348,7 +349,9 @@ impl FsEventWatcher {
     }
 
     fn remove_path(&mut self, path: &Path) -> Result<()> {
-        let str_path = path.to_str().unwrap();
+        let str_path = path
+            .to_str()
+            .ok_or_else(|| Error::generic("path is not valid UTF-8").add_path(path.into()))?;
         unsafe {
             let mut err: cf::CFErrorRef = ptr::null_mut();
             let cf_path = cf::str_path_to_cfstring_ref(str_path, &mut err);
@@ -390,7 +393,9 @@ impl FsEventWatcher {
             return Err(Error::path_not_found().add_path(path.into()));
         }
         let canonical_path = path.to_path_buf().canonicalize()?;
-        let str_path = path.to_str().unwrap();
+        let str_path = path
+            .to_str()
+            .ok_or_else(|| Error::generic("path is not valid UTF-8").add_path(path.into()))?;
         unsafe {
             let mut err: cf::CFErrorRef = ptr::null_mut();
             let cf_path = cf::str_path_to_cfstring_ref(str_path, &mut err);
@@ -536,15 +541,11 @@ unsafe fn callback_impl(
     let event_handler = &(*info).event_handler;
 
     for p in 0..num_events {
-        let path = CStr::from_ptr(*event_paths.add(p))
-            .to_str()
-            .expect("Invalid UTF8 string.");
-        let path = PathBuf::from(path);
+        let path = CStr::from_ptr(*event_paths.add(p)).to_bytes();
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(path));
 
         let flag = *event_flags.add(p);
-        let flag = StreamFlags::from_bits(flag).unwrap_or_else(|| {
-            panic!("Unable to decode StreamFlags: {}", flag);
-        });
+        let flag = StreamFlags::from_bits_truncate(flag);
 
         let mut handle_event = false;
         for (p, r) in &(*info).recursive_info {

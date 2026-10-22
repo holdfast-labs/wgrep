@@ -127,7 +127,7 @@ jobs:
         run: rg --version
 
       - name: Run library and binary tests
-        run: cargo test --locked --lib --bins
+        run: cargo test --locked --lib --bins --test wg_macos_fsevents
 
       - name: Run parity tests against rg 15.1.0
         if: ${{ !cancelled() }}
