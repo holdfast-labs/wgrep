@@ -318,6 +318,49 @@ impl State {
         }
     }
 
+    /// Whether a rebuild of the added files is due: a new epoch holds a file
+    /// that could have been skipped for being racy, and the racy window has
+    /// passed. One attempt per epoch, so content exclusions cannot loop.
+    fn added_rebuild_due(&self) -> bool {
+        self.added_epoch != self.added_rebuilt
+            && self.added.values().any(|added| added.pending)
+            && self.added_since.elapsed() >= Duration::from_nanos(build::RACY_NS as u64)
+    }
+
+    /// Whether the rebuild loop should publish a new generation.
+    fn rebuild_due(&self) -> bool {
+        self.dirty >= REBUILD_MIN_DIRTY || self.added_rebuild_due()
+    }
+
+    /// Adopt a generation that `rebuild` just published. `added_due` and
+    /// `added_epoch` are the values the loop decided on before the build.
+    ///
+    /// The reconcile runs even when only `dirty` triggered the rebuild. A
+    /// stale index (for example after a corpus copy changed every ctime) makes
+    /// every record mismatch; without this walk the old `dirty` count stays
+    /// above the threshold and an idle daemon rebuilds every interval forever.
+    fn adopt_rebuilt(
+        &mut self,
+        index: Index,
+        build_started_ns: Option<i64>,
+        added_due: bool,
+        added_epoch: u64,
+    ) {
+        self.index = Arc::new(index);
+        self.build_started_ns = build_started_ns;
+        // One attempt per set of added files. Files the builder can never
+        // index stay candidates without forcing more rebuilds. Only record an
+        // attempt when the racy window had passed; a dirty-triggered rebuild
+        // before that must not suppress the later added-files rebuild.
+        if added_due {
+            self.added_rebuilt = added_epoch;
+        }
+        self.flag_rescan(WalkCause::Rebuild);
+        if let Err(err) = self.reconcile() {
+            eprintln!("wgrep: post-rebuild reconcile failed: {err:#}");
+        }
+    }
+
     /// Whether the index's record for `id` matches `md` and a change `token`.
     fn record_matches(index: &Index, id: usize, md: &std::fs::Metadata, token: Option<i64>) -> bool {
         Self::record_matches_clock(index, id, &FileClock::of(md, token))
@@ -1729,14 +1772,11 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
         .unwrap_or_else(Instant::now);
     loop {
         std::thread::sleep(Duration::from_secs(2));
-        let (dirty, added_epoch, added_due) = {
+        let (due, added_due, added_epoch) = {
             let s = state.read().unwrap();
-            let added_due = s.added_epoch != s.added_rebuilt
-                && s.added.values().any(|added| added.pending)
-                && s.added_since.elapsed() >= Duration::from_nanos(build::RACY_NS as u64);
-            (s.dirty, s.added_epoch, added_due)
+            (s.rebuild_due(), s.added_rebuild_due(), s.added_epoch)
         };
-        if (dirty < REBUILD_MIN_DIRTY && !added_due) || last.elapsed() < REBUILD_INTERVAL {
+        if !due || last.elapsed() < REBUILD_INTERVAL {
             continue;
         }
         last = Instant::now();
@@ -1749,28 +1789,7 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
         match Index::open(&file) {
             Ok(index) => {
                 let mut s = state.write().unwrap();
-                s.index = Arc::new(index);
-                s.build_started_ns = build_started_ns;
-                // One attempt per set of added files. Files the builder can
-                // never index stay candidates without forcing more rebuilds.
-                // Only record an attempt when the racy window had passed;
-                // a dirty-triggered rebuild before that must not suppress the
-                // later added-files rebuild.
-                if added_due {
-                    s.added_rebuilt = added_epoch;
-                }
-                // Files that changed while the rebuild read them no longer
-                // match its metadata, so they stay dirty.
-                s.flag_rescan(WalkCause::Rebuild);
-                // Rebuild `ids` and `added` against the new generation now
-                // when added files need fresh counts, so status stops
-                // reporting them as pending. With no added files the next
-                // query can reconcile lazily as before.
-                if added_due {
-                    if let Err(err) = s.reconcile() {
-                        eprintln!("wgrep: post-rebuild reconcile failed: {err:#}");
-                    }
-                }
+                s.adopt_rebuilt(index, build_started_ns, added_due, added_epoch);
                 eprintln!("wgrep: swapped to {}", file.display());
             }
             Err(err) => eprintln!("wgrep: cannot open rebuilt index: {err}"),
@@ -2238,6 +2257,41 @@ mod tests {
         assert_eq!(stats["pending"].as_u64(), Some(1), "{stats}");
         assert_eq!(stats["unindexed"].as_u64(), Some(1), "{stats}");
         assert_eq!(state.added_epoch, 1);
+    }
+
+    #[test]
+    fn dirty_rebuild_reconciles_and_stops_the_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rebuilt = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("old.rs"), "fn old() {}\n").unwrap();
+        set_mtime_secs_ago(&root.join("old.rs"), 60);
+
+        // A cached generation from before a corpus re-copy: every ctime
+        // changed, so the first walk marks every record dirty.
+        let mut state = state_for(&root, empty_index_built_at(store.path(), now_unix_ns()));
+        state.needs_rescan = true;
+        state.reconcile().unwrap();
+        state.dirty = REBUILD_MIN_DIRTY + 100;
+        assert!(state.rebuild_due(), "a dirty tree must ask for a rebuild");
+
+        // The loop rebuilds and adopts the new generation. No added file is
+        // pending, so before the fix only `dirty` triggered this rebuild and
+        // no reconcile ran: the stale count kept `rebuild_due` true forever.
+        let file = rebuilt.path().join("unit-index-built.wgi");
+        empty_index_built_at(rebuilt.path(), now_unix_ns());
+        let index = Index::open(&file).unwrap();
+        let epoch = state.added_epoch;
+        state.adopt_rebuilt(index, Some(now_unix_ns()), false, epoch);
+
+        assert_eq!(state.dirty, 0, "a successful rebuild must refresh the dirty count");
+        assert!(!state.needs_rescan, "the post-rebuild walk must clear the rescan flag");
+        assert_eq!(state.walks.rebuild, 1, "the post-rebuild walk must run");
+        assert!(
+            !state.rebuild_due(),
+            "with dirty 0 and no pending added file, no later interval may rebuild"
+        );
     }
 
     /// A running text event loop for tests that need to feed real events.

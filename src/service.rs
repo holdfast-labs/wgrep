@@ -410,14 +410,19 @@ fn request_timeout(v: serde_json::Value, whole: Duration) -> Result<serde_json::
 /// cannot index them (UTF-16 BOM, high-diversity, unreadable) and they stay
 /// candidates. Report the total the text route knows.
 fn text_status(text: &Arc<TextIndex>) -> serde_json::Value {
-    let mut value = text.status();
+    decorate_text_status(text.status())
+}
+
+/// Add the totals `wg status` shows. `building` means a rebuild is due, so
+/// `pending > 0`. A lazily cleared `needs_rescan` is not a rebuild; `wg status`
+/// shows it as the `reconciling` phase instead.
+fn decorate_text_status(mut value: serde_json::Value) -> serde_json::Value {
     let indexed = value["files"].as_u64().unwrap_or(0);
     let added = value["added"].as_u64().unwrap_or(0);
     let pending = value["pending"].as_u64().unwrap_or(0);
     value["indexed"] = serde_json::json!(indexed);
     value["files"] = serde_json::json!(indexed + added);
-    value["building"] =
-        serde_json::json!(pending > 0 || value["needs_rescan"].as_bool().unwrap_or(false));
+    value["building"] = serde_json::json!(pending > 0);
     value
 }
 
@@ -1352,6 +1357,28 @@ mod tests {
             shutdown: AtomicBool::new(false),
         }
     }
+    #[test]
+    fn text_status_building_means_a_rebuild_is_due() {
+        // An idle daemon with a lazily pending rescan is not building: the
+        // human status shows it as `reconciling`, and `building` stays false.
+        let rescan = decorate_text_status(serde_json::json!({
+            "files": 10,
+            "added": 1,
+            "pending": 0,
+            "needs_rescan": true,
+        }));
+        assert_eq!(rescan["building"], false, "{rescan}");
+        assert_eq!(rescan["needs_rescan"], true, "{rescan}");
+
+        let pending = decorate_text_status(serde_json::json!({
+            "files": 10,
+            "added": 1,
+            "pending": 1,
+            "needs_rescan": true,
+        }));
+        assert_eq!(pending["building"], true, "{pending}");
+    }
+
     #[test]
     fn readiness_wait_drains_work_but_never_accepts_lost_trust() {
         let svc = empty_service();
