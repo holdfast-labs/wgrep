@@ -199,12 +199,127 @@ pub struct Args {
     explain: bool,
 }
 
+/// Chunk text storage. A live index keeps the base snapshot's text in the same
+/// memory-mapped file as its vectors; only a rebuilt file owns its text on the
+/// heap until the next fold. Serializes as a plain string, so output bytes do
+/// not change.
+#[derive(Clone)]
+pub enum ChunkText {
+    Heap(Box<str>),
+    Mapped {
+        map: std::sync::Arc<memmap2::Mmap>,
+        offset: usize,
+        len: usize,
+    },
+}
+
+impl ChunkText {
+    /// Map one validated UTF-8 byte range. Every range read from a cache passes
+    /// through this check before use, so a corrupt cache can never produce an
+    /// out-of-range or invalid slice.
+    pub fn mapped(map: std::sync::Arc<memmap2::Mmap>, offset: usize, len: usize) -> Result<Self> {
+        let end = offset
+            .checked_add(len)
+            .ok_or("chunk text offset overflow")?;
+        let bytes = map.get(offset..end).ok_or("chunk text outside snapshot")?;
+        if std::str::from_utf8(bytes).is_err() {
+            return Err("chunk text is not UTF-8".into());
+        }
+        Ok(ChunkText::Mapped { map, offset, len })
+    }
+
+    /// Map a range whose bytes this process just wrote from `&str`. Bounds are
+    /// still checked; the UTF-8 scan is skipped so a fold does not fault every
+    /// text page into the resident set. Never call this for cache input.
+    pub fn mapped_trusted(
+        map: std::sync::Arc<memmap2::Mmap>,
+        offset: usize,
+        len: usize,
+    ) -> Result<Self> {
+        let end = offset
+            .checked_add(len)
+            .ok_or("chunk text offset overflow")?;
+        map.get(offset..end)
+            .ok_or("chunk text outside snapshot")?;
+        Ok(ChunkText::Mapped { map, offset, len })
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            ChunkText::Heap(text) => text,
+            ChunkText::Mapped { map, offset, len } => {
+                // `mapped` validated this exact range as UTF-8. The map is
+                // immutable for its whole lifetime, so the bytes cannot change.
+                unsafe { std::str::from_utf8_unchecked(&map[*offset..*offset + *len]) }
+            }
+        }
+    }
+
+}
+
+impl std::ops::Deref for ChunkText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ChunkText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ChunkText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl std::fmt::Debug for ChunkText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl From<String> for ChunkText {
+    fn from(value: String) -> Self {
+        ChunkText::Heap(value.into())
+    }
+}
+
+impl From<&str> for ChunkText {
+    fn from(value: &str) -> Self {
+        ChunkText::Heap(value.into())
+    }
+}
+
+impl From<Box<str>> for ChunkText {
+    fn from(value: Box<str>) -> Self {
+        ChunkText::Heap(value)
+    }
+}
+
+impl Serialize for ChunkText {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ChunkText {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Ok(ChunkText::Heap(
+            String::deserialize(deserializer)?.into_boxed_str(),
+        ))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Chunk {
     pub path: SharedStr,
     pub start: usize,
     pub end: usize,
-    pub content: Box<str>,
+    pub content: ChunkText,
     #[serde(skip)]
     pub counts: HashMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,16 +455,28 @@ pub fn make_chunk<P: Into<SharedStr>>(
     end: usize,
     content: String,
 ) -> Chunk {
+    make_chunk_content(path, start, end, ChunkText::from(content))
+}
+
+/// Build a chunk from any text storage, including a mapped base snapshot. Word
+/// counts always come from the text bytes, so a mapped chunk scores exactly
+/// like a heap chunk with the same content.
+pub fn make_chunk_content<P: Into<SharedStr>>(
+    path: P,
+    start: usize,
+    end: usize,
+    content: ChunkText,
+) -> Chunk {
     let path = path.into();
     let mut counts = HashMap::new();
-    for word in words(&content).into_iter().chain(words(&path)) {
+    for word in words(content.as_str()).into_iter().chain(words(&path)) {
         *counts.entry(word).or_insert(0) += 1;
     }
     Chunk {
         path,
         start,
         end,
-        content: content.into(),
+        content,
         counts,
         scores: None,
     }

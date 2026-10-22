@@ -9,7 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -18,9 +18,10 @@ use std::time::Instant;
 /// Snapshot cache identity and bounds. Bump `SNAPSHOT_VERSION` when the chunk
 /// ranges or vector layout change, not merely when unrelated ranking changes.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"WGSNAP\0\0";
-/// Version 2 stores the passage vectors once, after all per-file metadata, so
-/// a snapshot can be memory-mapped and served without copying them to the heap.
-const SNAPSHOT_VERSION: u32 = 2;
+/// Version 3 stores chunk text and then the passage vectors, after all per-file
+/// metadata, so a snapshot can be memory-mapped and served without copying
+/// either to the heap. Version 2 files are rejected once and rebuilt.
+const SNAPSHOT_VERSION: u32 = 3;
 /// Fold heap vectors back into a mapped snapshot after this many of them.
 const VECTOR_FOLD_HEAP: usize = 65_536;
 /// An upper bound on cached chunk rows. A cache above it is ignored; a
@@ -33,6 +34,10 @@ const SNAPSHOT_MAX_META: usize = 1024 * 1024;
 /// Rewrite the cache for a single-file batch only when that many files change
 /// at once. This avoids a synchronous 65 MB write on every editor save.
 const SNAPSHOT_REWRITE_FILES: usize = 16;
+/// Distinguishes concurrent or retried temporary snapshot files. A failed
+/// vector append can leave a mapped temp file behind on Windows; a later fold
+/// must never truncate that file.
+static SNAPSHOT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Return freed worker-arena pages to the OS after a large build.
 ///
@@ -348,6 +353,9 @@ pub struct MemoryReport {
     pub chunk_arc_headers: u64,
     pub content_bytes: u64,
     pub content_len: u64,
+    pub mapped_text_bytes: u64,
+    pub mapped_texts: u64,
+    pub heap_texts: u64,
     pub path_bytes: u64,
     pub path_len: u64,
     pub counts_entries: u64,
@@ -574,10 +582,6 @@ impl<'a> Cursor<'a> {
         Ok(self.take(len)?.to_vec())
     }
 
-    fn skip(&mut self, len: usize) -> Result<()> {
-        self.take(len)?;
-        Ok(())
-    }
 }
 
 fn read_u32(reader: &mut impl Read) -> Result<u32> {
@@ -607,14 +611,16 @@ fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
     }
 }
 
-/// Load a v1 snapshot cache into a partial [`Snapshot`].
+/// Load a v3 snapshot cache into a partial [`Snapshot`].
 ///
-/// The cache stores only chunk line ranges, file digests, and passage vectors.
-/// Each entry is accepted only when its digest still matches the file. Chunk
-/// content and word counts are rebuilt with the same normalization and
-/// `make_chunk` call as [`prepare_file`], so a cache hit is identical to a
-/// fresh build. Any header, bound, or record problem rejects the whole cache;
-/// callers then do a full build.
+/// The cache stores chunk line ranges, the chunk text itself, file digests,
+/// and passage vectors. Each entry is accepted only when its digest still
+/// matches the file. Chunk text is served from the mapping, after its offset
+/// and length are checked against the file and its bytes are checked as UTF-8
+/// and against the live source lines. Word counts are recomputed with the same
+/// normalization and `make_chunk` math as [`prepare_file`], so a cache hit is
+/// identical to a fresh build. Any header, bound, or record problem rejects the
+/// whole cache; callers then do a full build.
 /// Normalize line endings once. Most trees are LF-only, so avoid the two full
 /// copies that an unconditional `replace` pair makes.
 fn normalize_source(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
@@ -637,10 +643,19 @@ where
     items.par_iter().map(f).collect()
 }
 
+/// One chunk's cached metadata: source line range and its byte range in the
+/// snapshot's text section.
+struct CachedChunk {
+    start: usize,
+    end: usize,
+    text_offset: usize,
+    text_len: usize,
+}
+
 struct CachedEntry {
     rel: PathBuf,
     digest: [u8; 32],
-    ranges: Vec<(usize, usize)>,
+    chunks: Vec<CachedChunk>,
     vec_offset: usize,
 }
 
@@ -666,17 +681,42 @@ struct RebuiltCached {
     raw: Vec<RawChunk>,
 }
 
-/// Rebuild one cached file from the live bytes. The cached ranges are applied
-/// with the same line slicing and `make_chunk` as a fresh build. A stale or
-/// malformed entry returns `None`; the caller's reconcile rebuilds that file.
-fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<RebuiltCached> {
+/// True when `text` is exactly the concatenation of `lines`. Used to reject a
+/// cache whose text section and line ranges disagree, without allocating the
+/// concatenation.
+fn text_equals_lines(text: &str, lines: &[&str]) -> bool {
+    let mut at = 0usize;
+    for line in lines {
+        let bytes = line.as_bytes();
+        let Some(end) = at.checked_add(bytes.len()) else {
+            return false;
+        };
+        if text.as_bytes().get(at..end) != Some(bytes) {
+            return false;
+        }
+        at = end;
+    }
+    at == text.len()
+}
+
+/// Rebuild one cached file from the live bytes, but point its content at the
+/// snapshot's mapped text section instead of copying it to the heap. The cached
+/// ranges are checked against the live lines, and the mapped bytes must be
+/// exactly those lines. A stale or malformed entry returns `None`; the caller's
+/// reconcile rebuilds that file.
+fn rebuild_cached_file(
+    root: &Path,
+    entry: &CachedEntry,
+    map: &Arc<Mmap>,
+    text_base: usize,
+) -> Option<RebuiltCached> {
     let bytes = std::fs::read(root.join(&entry.rel)).ok()?;
     let actual: [u8; 32] = Sha256::digest(&bytes).into();
     if actual != entry.digest {
         return None;
     }
     if bytes.contains(&0) {
-        if !entry.ranges.is_empty() {
+        if !entry.chunks.is_empty() {
             return None;
         }
         return Some(RebuiltCached {
@@ -689,14 +729,19 @@ fn rebuild_cached_file(root: &Path, entry: &CachedEntry) -> Option<RebuiltCached
     let source = normalize_source(&bytes);
     let lines: Vec<&str> = source.split_inclusive('\n').collect();
     let shared_path = crate::SharedStr::new(entry.rel.to_string_lossy());
-    let mut rows = Vec::with_capacity(entry.ranges.len());
-    let mut raw = Vec::with_capacity(entry.ranges.len());
-    for &(first, last) in &entry.ranges {
+    let mut rows = Vec::with_capacity(entry.chunks.len());
+    let mut raw = Vec::with_capacity(entry.chunks.len());
+    for cached in &entry.chunks {
+        let (first, last) = (cached.start, cached.end);
         if first < 1 || last < first || last > lines.len() {
             return None;
         }
-        let content = lines[first - 1..last].concat();
-        let mut chunk = make_chunk(shared_path.clone(), first, last, content);
+        let offset = text_base.checked_add(cached.text_offset)?;
+        let content = crate::ChunkText::mapped(map.clone(), offset, cached.text_len).ok()?;
+        if !text_equals_lines(content.as_str(), &lines[first - 1..last]) {
+            return None;
+        }
+        let mut chunk = crate::make_chunk_content(shared_path.clone(), first, last, content);
         raw.push(raw_from_chunk(&mut chunk));
         rows.push(Arc::new(chunk));
     }
@@ -744,14 +789,30 @@ fn load_snapshot_cache(
     let file_count = cursor.u32()? as usize;
     let total_chunks = cursor.u32()? as usize;
     let meta_len = cursor.u64()? as usize;
+    let text_base = cursor.u64()? as usize;
+    let text_section_len = cursor.u64()? as usize;
     let vector_base = cursor.u64()? as usize;
     if file_count > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
         return Err("snapshot cache header count exceeds bound".into());
     }
-    if vector_base
-        .checked_add(total_chunks * 256 * 4)
-        .is_none_or(|end| end > map.len())
+    // Layout: header, metadata, text, alignment padding, vectors. Every offset
+    // is checked against the file before any slice is made.
+    if text_base
+        .checked_sub(cursor.at)
+        .is_none_or(|len| len != meta_len)
     {
+        return Err("snapshot cache metadata length is invalid".into());
+    }
+    if text_base
+        .checked_add(text_section_len)
+        .is_none_or(|end| end > vector_base)
+    {
+        return Err("snapshot cache text section exceeds the file".into());
+    }
+    let vector_end = vector_base
+        .checked_add(total_chunks * 256 * 4)
+        .ok_or("snapshot cache vector section overflow")?;
+    if vector_end > map.len() {
         return Err("snapshot cache vector section exceeds the file".into());
     }
     // `VectorRef::as_slice` casts mapped bytes to `f32`; an unaligned base
@@ -759,15 +820,7 @@ fn load_snapshot_cache(
     if vector_base % std::mem::align_of::<f32>() != 0 {
         return Err("snapshot cache vector section is misaligned".into());
     }
-    // The header ends after the vector-base field; padding follows, then the
-    // metadata block, then the vector table.
-    let meta_start = vector_base
-        .checked_sub(meta_len)
-        .ok_or("snapshot cache metadata length is invalid")?;
-    if meta_start < cursor.at {
-        return Err("snapshot cache metadata overlaps the header".into());
-    }
-    cursor.skip(meta_start - cursor.at)?;
+    // The metadata starts right after the header and ends at `text_base`.
     let mut entries: Vec<CachedEntry> = Vec::with_capacity(file_count.min(4096));
     let mut paths: HashSet<PathBuf> = HashSet::with_capacity(file_count.min(4096));
     let mut seen_chunks = 0usize;
@@ -799,23 +852,39 @@ fn load_snapshot_cache(
         {
             return Err("snapshot cache chunk count exceeds header".into());
         }
-        let mut ranges = Vec::with_capacity(chunk_count.min(1024));
+        let mut chunks = Vec::with_capacity(chunk_count.min(1024));
         for _ in 0..chunk_count {
             let start = cursor.u32()? as usize;
             let end = cursor.u32()? as usize;
-            ranges.push((start, end));
+            let text_offset = cursor.u64()? as usize;
+            let chunk_text_len = cursor.u32()? as usize;
+            if text_offset
+                .checked_add(chunk_text_len)
+                .is_none_or(|end| end > text_section_len)
+            {
+                return Err("snapshot cache text range exceeds the text section".into());
+            }
+            chunks.push(CachedChunk {
+                start,
+                end,
+                text_offset,
+                text_len: chunk_text_len,
+            });
         }
         let vec_offset = vector_base + seen_chunks * 256 * 4;
         seen_chunks += chunk_count;
         entries.push(CachedEntry {
             rel,
             digest,
-            ranges,
+            chunks,
             vec_offset,
         });
     }
     if seen_chunks != total_chunks {
         return Err("snapshot cache chunk total mismatch".into());
+    }
+    if cursor.at != text_base {
+        return Err("snapshot cache metadata length mismatch".into());
     }
     // Rebuild the per-file rows on the worker pool, in bounded batches. A
     // stale or unreadable file is simply absent from the partial state; the
@@ -828,7 +897,9 @@ fn load_snapshot_cache(
         progress.set_files(0, entries.len());
     }
     for batch in entries.chunks(256) {
-        let rebuilt = parallel_map(batch, |entry| rebuild_cached_file(root, entry));
+        let rebuilt = parallel_map(batch, |entry| {
+            rebuild_cached_file(root, entry, &map, text_base)
+        });
         for (item, entry) in rebuilt.into_iter().zip(batch) {
             let Some(item) = item else { continue };
             let lexical = interner.intern_file(item.raw);
@@ -1127,7 +1198,22 @@ fn embed_heap_vectors(
         .collect())
 }
 
-/// The mapped result of folding a generation back to disk.
+/// A snapshot whose header, metadata and text section are on disk and mapped,
+/// but whose vector table is not written yet. The mapping lets the caller point
+/// every chunk at its text and drop the heap copy before the (usually long)
+/// embedding pass. Vectors are then appended through the same file handle.
+struct SnapshotText {
+    file: File,
+    tmp: PathBuf,
+    dest: PathBuf,
+    map: Arc<Mmap>,
+    text_base: usize,
+    text_len: usize,
+    vector_base: usize,
+    generation: u64,
+}
+
+/// The mapped result of a completed fold.
 struct FoldedSnapshot {
     map: Arc<Mmap>,
     vector_base: usize,
@@ -1135,29 +1221,34 @@ struct FoldedSnapshot {
     generation: u64,
 }
 
-/// Write a complete v2 snapshot: header, per-file metadata, then one contiguous
-/// vector table. Vectors are written in chunk-id order; a missing (None) slot is
-/// embedded by `embed` in the same 512-row batches the heap path uses, so the
-/// embedding inputs and outputs do not change. The caller never holds all
-/// vectors on the heap.
-#[allow(clippy::too_many_arguments)]
-fn write_snapshot_folded(
+/// Write the header, per-file metadata and text section of a v3 snapshot.
+///
+/// The file is opened read+write so the text section can be mapped through the
+/// same handle before the vectors are appended. Layout: header, metadata, text,
+/// alignment padding, vectors. The header carries all three offsets so the
+/// reader can validate every section.
+fn write_snapshot_text(
     base: &Path,
     root: &Path,
     model: &LoadedModel,
     generation: u64,
     ordered: &[PathBuf],
     files: &HashMap<PathBuf, Arc<FileData>>,
-    chunks: &[Arc<Chunk>],
-    slots: &[Option<VectorRef>],
-    missing: &[usize],
-    progress: Option<&BuildProgress>,
-) -> Result<FoldedSnapshot> {
-    let total_chunks = chunks.len();
+) -> Result<SnapshotText> {
+    let total_chunks: usize = ordered.iter().map(|rel| files[rel].chunks.len()).sum();
     if files.len() > SNAPSHOT_MAX_FILES || total_chunks > SNAPSHOT_MAX_CHUNKS {
         return Err("snapshot exceeds cache bounds".into());
     }
-    let mut meta = Vec::new();
+    let mut text_len = 0usize;
+    for rel in ordered {
+        for chunk in &files[rel].chunks {
+            text_len = text_len
+                .checked_add(chunk.content.as_str().len())
+                .ok_or("snapshot text section overflows")?;
+        }
+    }
+    let mut meta = Vec::with_capacity(total_chunks.saturating_mul(20));
+    let mut text_offset = 0u64;
     for rel in ordered {
         let data = &files[rel];
         write_field(
@@ -1171,9 +1262,21 @@ fn write_snapshot_folded(
             if chunk.start > u32::MAX as usize || chunk.end > u32::MAX as usize {
                 return Err("snapshot cache range exceeds u32".into());
             }
+            let len = chunk.content.as_str().len();
+            if len > u32::MAX as usize {
+                return Err("snapshot cache chunk text exceeds u32".into());
+            }
             meta.extend_from_slice(&(chunk.start as u32).to_le_bytes());
             meta.extend_from_slice(&(chunk.end as u32).to_le_bytes());
+            meta.extend_from_slice(&text_offset.to_le_bytes());
+            meta.extend_from_slice(&(len as u32).to_le_bytes());
+            text_offset = text_offset
+                .checked_add(len as u64)
+                .ok_or("snapshot text section overflows")?;
         }
+    }
+    if text_offset as usize != text_len {
+        return Err("snapshot text length mismatch".into());
     }
     let mut header = Vec::new();
     header.extend_from_slice(SNAPSHOT_MAGIC);
@@ -1191,16 +1294,19 @@ fn write_snapshot_folded(
     header.extend_from_slice(&generation.to_le_bytes());
     header.extend_from_slice(&(files.len() as u32).to_le_bytes());
     header.extend_from_slice(&(total_chunks as u32).to_le_bytes());
-    // Pad the metadata to four bytes, then pad the header so the f32 table is
-    // four-byte aligned. The reader uses `meta_len` and `vector_base` to find
-    // the metadata and skip the header padding.
-    meta.extend(std::iter::repeat_n(0u8, (4 - meta.len() % 4) % 4));
+    let fields_end = header.len();
+    let text_base = fields_end
+        .checked_add(32)
+        .and_then(|at| at.checked_add(meta.len()))
+        .ok_or("snapshot header overflows")?;
+    let pad = (4 - (text_base + text_len) % 4) % 4;
+    let vector_base = text_base + text_len + pad;
     header.extend_from_slice(&(meta.len() as u64).to_le_bytes());
-    let header_prefix = header.len() + 8;
-    let pad = (4 - (header_prefix + meta.len()) % 4) % 4;
-    let vector_base = header_prefix + pad + meta.len();
+    header.extend_from_slice(&(text_base as u64).to_le_bytes());
+    header.extend_from_slice(&(text_len as u64).to_le_bytes());
     header.extend_from_slice(&(vector_base as u64).to_le_bytes());
-    header.extend(std::iter::repeat_n(0u8, pad));
+    debug_assert_eq!(header.len(), fields_end + 32);
+    debug_assert_eq!(header.len() + meta.len(), text_base);
 
     if let Some(parent) = base.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1210,15 +1316,125 @@ fn write_snapshot_folded(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("snapshot");
-    let tmp = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let sequence = SNAPSHOT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dest.with_file_name(format!(
+        ".{name}.{}.{sequence}.tmp",
+        std::process::id()
+    ));
+    let result = (|| -> Result<File> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&tmp)?;
+        {
+            let mut writer = BufWriter::new(&file);
+            writer.write_all(&header)?;
+            writer.write_all(&meta)?;
+            let mut written = 0usize;
+            for rel in ordered {
+                for chunk in &files[rel].chunks {
+                    let bytes = chunk.content.as_str().as_bytes();
+                    writer.write_all(bytes)?;
+                    written += bytes.len();
+                }
+            }
+            if written != text_len {
+                return Err("snapshot text count mismatch".into());
+            }
+            writer.write_all(&vec![0u8; pad])?;
+            writer.flush()?;
+        }
+        Ok(file)
+    })();
+    let file = match result {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    let map = match unsafe { Mmap::map(&file) } {
+        Ok(map) => Arc::new(map),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+    };
+    Ok(SnapshotText {
+        file,
+        tmp,
+        dest,
+        map,
+        text_base,
+        text_len,
+        vector_base,
+        generation,
+    })
+}
+
+/// Read an exact byte range from a file at an absolute offset without mapping
+/// the page into this process. Used for the embedding pass so a cold build does
+/// not fault the whole just-written text section into resident memory.
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt as _;
+        return file.read_exact_at(buffer, offset);
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::fs::FileExt as _;
+        let mut buffer = buffer;
+        let mut offset = offset;
+        while !buffer.is_empty() {
+            let n = file.seek_read(buffer, offset)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "short snapshot read",
+                ));
+            }
+            offset += n as u64;
+            buffer = &mut buffer[n..];
+        }
+        Ok(())
+    }
+}
+
+/// Append the vector table to a mapped text snapshot, then publish it.
+///
+/// Vectors are written in chunk-id order; a missing (None) slot is embedded in
+/// the same 512-row batches the heap path uses, so the embedding inputs and
+/// outputs do not change. The caller's chunks already read their text from
+/// `text.map`, so the embedding pass never holds the text on the heap.
+fn finish_snapshot_folded(
+    mut text: SnapshotText,
+    model: &LoadedModel,
+    chunks: &[Arc<Chunk>],
+    slots: &[Option<VectorRef>],
+    missing: &[usize],
+    progress: Option<&BuildProgress>,
+) -> Result<FoldedSnapshot> {
+    let total_chunks = chunks.len();
+    text.file.seek(std::io::SeekFrom::Start(text.vector_base as u64))?;
+    // A separate read handle keeps positioned reads from moving the writer's
+    // file pointer (Windows `seek_read` updates the handle position).
+    let reader = match File::open(&text.tmp) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = std::fs::remove_file(&text.tmp);
+            return Err(error.into());
+        }
+    };
     let result = (|| -> Result<()> {
-        let mut writer = BufWriter::new(File::create(&tmp)?);
-        writer.write_all(&header)?;
-        writer.write_all(&meta)?;
+        let mut writer = BufWriter::new(&text.file);
         let mut batches = missing.chunks(512);
         let mut batch: Vec<Vec<f32>> = Vec::new();
         let mut batch_at = 0usize;
         let mut embedded = 0usize;
+        let mut buffer: Vec<u8> = Vec::new();
         if let Some(progress) = progress {
             progress.set_stage(STAGE_EMBED);
             progress.set_encoded(0, missing.len());
@@ -1231,10 +1447,22 @@ fn write_snapshot_folded(
                         let ids = batches
                             .next()
                             .ok_or("snapshot vector slot has no embedding batch")?;
-                        let texts: Vec<String> = ids
-                            .iter()
-                            .map(|&i| format!("{}\n{}", chunks[i].path, chunks[i].content))
-                            .collect();
+                        let mut texts = Vec::with_capacity(ids.len());
+                        for &i in ids {
+                            let (offset, len) = match &chunks[i].content {
+                                crate::ChunkText::Mapped { offset, len, .. } => (*offset, *len),
+                                crate::ChunkText::Heap(text) => {
+                                    texts.push(format!("{}\n{}", chunks[i].path, text));
+                                    continue;
+                                }
+                            };
+                            buffer.resize(len, 0);
+                            read_exact_at(&reader, &mut buffer, offset as u64)?;
+                            // The fold wrote these bytes from `&str`; they were
+                            // never read from an untrusted cache.
+                            let content = unsafe { std::str::from_utf8_unchecked(&buffer) };
+                            texts.push(format!("{}\n{}", chunks[i].path, content));
+                        }
                         batch = model.embed_parallel(&texts)?;
                         batch_at = 0;
                     }
@@ -1258,29 +1486,38 @@ fn write_snapshot_folded(
         }
         writer.flush()?;
         writer.get_ref().sync_all()?;
+        let expected = text.vector_base as u64 + total_chunks as u64 * 256 * 4;
+        let actual = text.file.metadata()?.len();
+        if actual != expected {
+            return Err(format!(
+                "snapshot vector section length {actual} != expected {expected}"
+            )
+            .into());
+        }
         Ok(())
     })();
-    match result {
-        Ok(()) => {
-            if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
-            }
-            std::fs::rename(&tmp, &dest)?;
-            let file = File::open(&dest)?;
-            let map = unsafe { Mmap::map(&file)? };
-            let _ = file.set_modified(std::time::SystemTime::now());
-            Ok(FoldedSnapshot {
-                map: Arc::new(map),
-                vector_base,
-                path: dest,
-                generation,
-            })
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(error)
-        }
+    if let Err(error) = result {
+        // The mapped text is still valid for this process; leave the tmp file
+        // for the OS to release and let the caller fall back to heap vectors.
+        let _ = std::fs::remove_file(&text.tmp);
+        return Err(error);
     }
+    if text.dest.exists() {
+        let _ = std::fs::remove_file(&text.dest);
+    }
+    if let Err(error) = std::fs::rename(&text.tmp, &text.dest) {
+        let _ = std::fs::remove_file(&text.tmp);
+        return Err(error.into());
+    }
+    let file = File::open(&text.dest)?;
+    let map = Arc::new(unsafe { Mmap::map(&file)? });
+    let _ = file.set_modified(std::time::SystemTime::now());
+    Ok(FoldedSnapshot {
+        map,
+        vector_base: text.vector_base,
+        path: text.dest,
+        generation: text.generation,
+    })
 }
 
 /// Remove superseded snapshot files. Best effort: on Windows an old mapping can
@@ -1507,7 +1744,16 @@ impl LiveIndex {
                 + data.lexical.lengths.capacity() * std::mem::size_of::<u32>())
                 as u64;
             for chunk in &data.chunks {
-                report.content_bytes += chunk.content.len() as u64;
+                match &chunk.content {
+                    crate::ChunkText::Heap(text) => {
+                        report.heap_texts += 1;
+                        report.content_bytes += text.len() as u64;
+                    }
+                    crate::ChunkText::Mapped { len, .. } => {
+                        report.mapped_texts += 1;
+                        report.mapped_text_bytes += *len as u64;
+                    }
+                }
                 report.content_len += chunk.content.len() as u64;
                 report.path_bytes += chunk.path.len() as u64;
                 report.path_len += chunk.path.len() as u64;
@@ -1856,30 +2102,91 @@ impl LiveIndex {
                 || heap_vectors + missing.len() > VECTOR_FOLD_HEAP
                 || self.should_write_cache(reconcile, changed));
         let mut folded: Option<FoldedSnapshot> = None;
+        // True once the pre-vector text snapshot exists and every chunk reads
+        // from it, even if appending the vectors later fails.
+        let mut text_remapped = false;
         let vectors: Vec<VectorRef> = if fold {
             let base = self.cache.as_deref().unwrap();
-            let result = write_snapshot_folded(
+            match write_snapshot_text(
                 base,
                 &self.root,
                 &model,
                 old.generation + 1,
                 &ordered,
                 &files,
-                &chunks,
-                &slots,
-                &missing,
-                progress,
-            );
-            match result {
-                Ok(result) => {
-                    let vectors = (0..chunks.len())
-                        .map(|i| VectorRef::Mapped {
-                            map: result.map.clone(),
-                            offset: result.vector_base + i * 256 * 4,
-                        })
-                        .collect();
-                    folded = Some(result);
-                    vectors
+            ) {
+                Ok(text) => {
+                    // Point every chunk at the newly written text section, one
+                    // file at a time. Replacing both the flat row and the
+                    // `FileData` entry frees that file's heap text immediately,
+                    // so the embedding pass never holds the text on the heap.
+                    // The bytes came from `&str` written by this call, so the
+                    // UTF-8 scan is skipped; cache input uses the checked
+                    // constructor.
+                    let mut offset = text.text_base;
+                    for rel in &ordered {
+                        let (start, len) = file_starts[rel];
+                        let data = files.get(rel).unwrap().clone();
+                        let mut fresh = Vec::with_capacity(len);
+                        for (i, chunk) in data.chunks.iter().enumerate() {
+                            let text_len = chunk.content.as_str().len();
+                            let content = crate::ChunkText::mapped_trusted(
+                                text.map.clone(),
+                                offset,
+                                text_len,
+                            )?;
+                            let replacement = Arc::new(Chunk {
+                                path: chunk.path.clone(),
+                                start: chunk.start,
+                                end: chunk.end,
+                                content,
+                                counts: HashMap::new(),
+                                scores: None,
+                            });
+                            chunks[start + i] = replacement.clone();
+                            fresh.push(replacement);
+                            offset += text_len;
+                        }
+                        files.insert(
+                            rel.clone(),
+                            Arc::new(FileData {
+                                digest: data.digest,
+                                chunks: fresh,
+                                vectors: Vec::new(),
+                                lexical: data.lexical.clone(),
+                            }),
+                        );
+                    }
+                    if offset != text.text_base + text.text_len {
+                        return Err("folded snapshot text length mismatch".into());
+                    }
+                    text_remapped = true;
+                    // The heap text just became unreachable. Return those pages
+                    // before the embedding pass, so the allocator does not keep
+                    // them resident for the rest of the build.
+                    trim_allocator();
+                    match finish_snapshot_folded(
+                        text, &model, &chunks, &slots, &missing, progress,
+                    ) {
+                        Ok(result) => {
+                            let vectors = (0..chunks.len())
+                                .map(|i| VectorRef::Mapped {
+                                    map: result.map.clone(),
+                                    offset: result.vector_base + i * 256 * 4,
+                                })
+                                .collect();
+                            folded = Some(result);
+                            vectors
+                        }
+                        Err(error) => {
+                            if std::env::var_os("WG_LIVE_TIMING").is_some() {
+                                eprintln!(
+                                    "wg live: fold_vectors_failed reason={error}; using heap vectors"
+                                );
+                            }
+                            embed_heap_vectors(&chunks, &slots, &missing, &model, progress)?
+                        }
+                    }
                 }
                 Err(error) => {
                     if std::env::var_os("WG_LIVE_TIMING").is_some() {
@@ -1918,7 +2225,7 @@ impl LiveIndex {
         // share them again without any lookup. A fold replaces the whole
         // mapped base, so every file points into the new map; otherwise only
         // the rebuilt spans change.
-        let refolded = folded.is_some();
+        let refolded = folded.is_some() || text_remapped;
         let touched: Vec<(PathBuf, usize, usize)> = if refolded {
             ordered
                 .iter()
@@ -1936,7 +2243,7 @@ impl LiveIndex {
                 rel,
                 Arc::new(FileData {
                     digest: data.digest,
-                    chunks: data.chunks.clone(),
+                    chunks: chunks[start..start + len].to_vec(),
                     vectors: vectors[start..start + len].to_vec(),
                     lexical: data.lexical.clone(),
                 }),
@@ -1999,7 +2306,7 @@ impl LiveIndex {
                 let _ = folded.generation;
             }
         }
-        if !layout_same || encoded >= 512 {
+        if !layout_same || encoded >= 512 || text_remapped {
             drop(old);
             trim_allocator();
         }
@@ -2516,6 +2823,207 @@ mod tests {
                 queries_before[i]
             );
         }
+    }
+
+    fn header_positions(data: &[u8]) -> (usize, usize, usize) {
+        let u32_at = |at: &mut usize| {
+            let value = u32::from_le_bytes(data[*at..*at + 4].try_into().unwrap()) as usize;
+            *at += 4;
+            value
+        };
+        let field = |at: &mut usize| {
+            let len = u32_at(at);
+            *at += len;
+        };
+        let mut at = 0;
+        at += 8; // magic
+        at += 4; // version
+        field(&mut at);
+        field(&mut at);
+        at += 8; // generation
+        at += 4; // file count
+        at += 4; // chunk count
+        at += 8; // meta length
+        let text_base = u64::from_le_bytes(data[at..at + 8].try_into().unwrap()) as usize;
+        at += 8;
+        let text_len_at = at;
+        at += 8;
+        let vector_base = u64::from_le_bytes(data[at..at + 8].try_into().unwrap()) as usize;
+        (text_base, text_len_at, vector_base)
+    }
+
+    #[test]
+    fn snapshot_cache_serves_text_from_the_mapping() {
+        let (_dir, root) = fixture();
+        let (_cache_dir, cache) = cache_place();
+        let first = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache.clone()),
+        )
+        .unwrap();
+        let first_report = first.memory_report();
+        assert_eq!(first_report.heap_texts, 0, "a fresh fold must map all text");
+        assert_eq!(first_report.mapped_texts as usize, first_report.chunks);
+        assert!(first_report.mapped_text_bytes > 0);
+        assert_eq!(first_report.content_bytes, 0);
+        let expected: Vec<_> = ["a.rs", "b.rs"].map(|rel| rows(&first, rel)).to_vec();
+        drop(first);
+
+        let second = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache),
+        )
+        .unwrap();
+        let report = second.memory_report();
+        assert_eq!(second.stats().encoded_texts, 0);
+        assert_eq!(report.heap_texts, 0, "a cache hit must not copy text");
+        assert_eq!(report.mapped_texts as usize, report.chunks);
+        for (i, rel) in ["a.rs", "b.rs"].iter().enumerate() {
+            assert_eq!(rows(&second, rel), expected[i]);
+        }
+    }
+
+    #[test]
+    fn a_fold_maps_edited_text_and_a_single_edit_keeps_only_its_text_on_the_heap() {
+        let (_dir, root) = fixture();
+        let (_cache_dir, cache) = cache_place();
+        let live = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache),
+        )
+        .unwrap();
+        assert_eq!(live.memory_report().heap_texts, 0);
+
+        let edited = root.join("a.rs");
+        std::fs::write(&edited, "fn alpha() {\n    let changed_value = 9;\n}\n").unwrap();
+        let stats = live.refresh(&[edited.clone()], false).unwrap();
+        assert_eq!(stats.changed_files, 1);
+        let report = live.memory_report();
+        assert!(report.heap_texts > 0, "an edit must own its text until a fold");
+        assert!(report.mapped_texts > 0);
+        assert_eq!(report.heap_texts + report.mapped_texts, report.chunks as u64);
+
+        // A new file changes the layout, so the next reconcile folds.
+        std::fs::write(root.join("c.rs"), "fn gamma() {\n    let c_value = 3;\n}\n").unwrap();
+        live.refresh(&[], true).unwrap();
+        let report = live.memory_report();
+        assert_eq!(report.heap_texts, 0, "a fold must move edited text to the map");
+        assert_eq!(report.mapped_texts as usize, report.chunks);
+    }
+
+    #[test]
+    fn corrupt_snapshot_text_is_rejected_and_rebuilt() {
+        let (_dir, root) = fixture();
+        let (_cache_dir, cache) = cache_place();
+        let first = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache.clone()),
+        )
+        .unwrap();
+        assert!(first.stats().encoded_texts > 0);
+        drop(first);
+
+        let valid = std::fs::read(&cache).unwrap();
+        let (_text_base, text_len_at, _) = header_positions(&valid);
+
+        // An offset outside the text section must reject the whole cache.
+        let mut out_of_range = valid.clone();
+        out_of_range[text_len_at..text_len_at + 8]
+            .copy_from_slice(&(valid.len() as u64 * 2).to_le_bytes());
+        std::fs::write(&cache, &out_of_range).unwrap();
+        let rebuilt = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache.clone()),
+        )
+        .unwrap();
+        assert!(rebuilt.stats().encoded_texts > 0);
+        assert_eq!(rebuilt.stats().files, 2);
+        drop(rebuilt);
+
+        // Invalid UTF-8 in the first chunk's mapped bytes must also rebuild.
+        let valid = std::fs::read(&cache).unwrap();
+        let (text_base, _, _) = header_positions(&valid);
+        let mut bad_utf8 = valid.clone();
+        bad_utf8[text_base] = 0xFF;
+        std::fs::write(&cache, &bad_utf8).unwrap();
+        let rebuilt = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache.clone()),
+        )
+        .unwrap();
+        assert!(rebuilt.stats().encoded_texts > 0);
+        assert_eq!(rebuilt.stats().files, 2);
+        drop(rebuilt);
+
+        let repaired = LiveIndex::open_with_cache(
+            &root,
+            ModelChoice::Code,
+            Arc::new(ModelPool::new(None)),
+            Some(cache),
+        )
+        .unwrap();
+        assert_eq!(repaired.stats().encoded_texts, 0);
+    }
+
+    #[test]
+    fn mapped_snapshot_can_be_renamed_on_this_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from.wgsnap");
+        let to = dir.path().join("to.wgsnap");
+        std::fs::write(&from, b"mapped bytes").unwrap();
+        let file = File::open(&from).unwrap();
+        let map = unsafe { Mmap::map(&file).unwrap() };
+        // A fold maps the text section, then appends the vector table through
+        // the same handle and renames the file.
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&from).unwrap();
+        writer.write_all(b" more").unwrap();
+        writer.sync_all().unwrap();
+        std::fs::rename(&from, &to).unwrap();
+        assert_eq!(&map[..], b"mapped bytes");
+        assert_eq!(std::fs::read(&to).unwrap(), b"mapped bytes more");
+        assert!(to.is_file());
+    }
+
+    #[test]
+    fn map_then_append_keeps_the_file_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seq.wgsnap");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        {
+            let mut writer = BufWriter::new(&file);
+            writer.write_all(&vec![7u8; 364]).unwrap();
+            writer.flush().unwrap();
+        }
+        let _map = unsafe { Mmap::map(&file).unwrap() };
+        {
+            let mut same = &file;
+            same.seek(std::io::SeekFrom::Start(364)).unwrap();
+        }
+        {
+            let mut writer = BufWriter::new(&file);
+            writer.write_all(&vec![9u8; 2048]).unwrap();
+            writer.flush().unwrap();
+            writer.get_ref().sync_all().unwrap();
+        }
+        assert_eq!(file.metadata().unwrap().len(), 2412);
     }
 
     #[test]

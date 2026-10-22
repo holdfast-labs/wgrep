@@ -45,9 +45,12 @@ fn print_memory_breakdown() {
         63457, report.files, report.chunks
     );
     println!(
-        "estimate_mib={:.1} rss_mib={:.1} peak_rss_mib={:.1}",
+        "estimate_mib={:.1} rss_mib={:.1} peak_rss_mib={:.1} anon_mib={:.1} file_mib={:.1} shmem_mib={:.1}",
         report.total_estimate_bytes as f64 / 1048576.0,
         status_kib("VmRSS:").unwrap_or(0) as f64 / 1024.0,
         status_kib("VmHWM:").unwrap_or(0) as f64 / 1024.0,
+        status_kib("RssAnon:").unwrap_or(0) as f64 / 1024.0,
+        status_kib("RssFile:").unwrap_or(0) as f64 / 1024.0,
+        status_kib("RssShmem:").unwrap_or(0) as f64 / 1024.0,
     );
 }
