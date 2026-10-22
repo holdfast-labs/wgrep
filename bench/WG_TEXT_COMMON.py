@@ -284,9 +284,43 @@ def service(wg, root, work, **kwargs):
         svc.stop()
 
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def _process_alive_windows(pid: int) -> bool:
+        handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == _STILL_ACTIVE
+        finally:
+            _kernel32.CloseHandle(handle)
+
+
 def process_alive(pid: int) -> bool:
+    """Return True while ``pid`` is a live process.
+
+    ``os.kill(pid, 0)`` is a reliable probe only on POSIX. On Windows it
+    raises ``WinError 87`` for a live process, so query the exit code instead.
+    """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _process_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except OSError:

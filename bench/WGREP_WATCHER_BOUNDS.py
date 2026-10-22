@@ -16,6 +16,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from WG_TEXT_COMMON import process_alive  # noqa: E402
+
 
 def run(argv, env, timeout=15):
     return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL,
@@ -160,9 +163,7 @@ def main():
         while time.monotonic() < deadline:
             if match is None:
                 break
-            try:
-                os.kill(int(match.group(1)), 0)
-            except ProcessLookupError:
+            if not process_alive(int(match.group(1))):
                 break
             time.sleep(.05)
         else:
