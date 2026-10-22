@@ -1,47 +1,45 @@
 Require wg
-Require rg
-Output docs/media/wg-live.gif
 Output docs/media/wg-live.mp4
 Set Shell "bash"
 Set Width 1200
-Set Height 800
-Set FontSize 23
-Set FontFamily "JetBrains Mono"
+Set Height 560
+Set FontSize 26
+Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
-Set Padding 26
-Set Margin 18
-Set MarginFill "#1e1e2e"
+Set Padding 16
+Set Margin 10
+Set MarginFill "#181825"
 Set BorderRadius 16
 Set WindowBar Colorful
 Set WindowBarSize 36
-Set TypingSpeed 14ms
+Set TypingSpeed 8ms
 Set Framerate 30
+Set CursorBlink false
 Set PlaybackSpeed 1
-Set WaitTimeout 2m
+Set WaitTimeout 3m
 Hide
 Type "source docs/demos/prepare.sh"
 Enter
-Sleep 500ms
+Sleep 1s
 Type "wg up --model code"
 Enter
-Wait+Line /❯\s*$/
+Wait+Screen /PID:/
+Wait+Line /\$$/
+Sleep 1s
+Type "clear"
+Enter
+Sleep 500ms
 Show
-Type "# exact search: no match yet"
+Type `wg --no-heading -n -F round_secs .`
 Enter
-Type "wg -n -F refresh_token ."
+Sleep 1500ms
+Type `echo 'pub fn round_secs(t:f64)->u64{t.round() as u64}' >> live.rs`
 Enter
-Wait+Line /❯\s*$/
-Sleep 700ms
-Type "echo 'pub fn refresh_token() -> bool { true }' >> auth.rs"
+Sleep 800ms
+Type `wg --no-heading -n -F round_secs .`
 Enter
-Sleep 300ms
-Type "# the daemon sees the edit immediately"
-Enter
-Type "wg -n -F refresh_token ."
-Enter
-Wait+Line /❯\s*$/
-Sleep 1800ms
+Sleep 2500ms
 Hide
 Type "wg down"
 Enter
-Wait+Line /❯\s*$/
+Sleep 1500ms

@@ -1,50 +1,87 @@
 # Reproduce the terminal demos
 
-These are real command recordings made with VHS, the Go CLI recorder. The
-clips are short and loop cleanly so the README stays visual. Playback is 1.0;
-no clip is sped up. They use small generated repositories and cached code-model
-assets. They are onboarding examples, not Rust-corpus timing benchmarks.
+These are real command recordings made with VHS, the Go CLI recorder. The GIFs
+are short, loop, and stay under 2 MB so the README stays visual. Playback is 1x;
+no clip is sped up. They use the 13.3k-file Rust `src` corpus and a small
+two-file `api-server` repository. They are not toy fixtures.
 
-| clip | shows |
-|---|---|
-| `quickstart` | `wg up`, semantic ranking, and a ripgrep flag |
-| `live` | an edit is searchable before the next prompt |
-| `multi-repo` | two repositories behind one daemon and one model |
+| clip | shows | GIF |
+|---|---|---:|
+| `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x700, 9.1 s, 281,509 B |
+| `live` | an edit is searchable before the next prompt | 1200x560, 6.2 s, 147,422 B |
+| `multi-repo` | two roots behind one daemon and one model | 1200x700, 6.0 s, 281,048 B |
 
-Requirements: VHS 0.12.1, ttyd 1.7.7, ffmpeg, Chromium, JetBrains Mono, the
-current `wg` binary and rg 15.1.0 on `PATH`. Cache the verified code-model
-assets once before recording; the tapes default to offline operation.
+The README captions are:
+
+- `quickstart`: *Ask in plain English, or use a ripgrep flag.*
+- `live`: *No restart. The edit is searchable before the next prompt returns.*
+- `multi-repo`: *One daemon, one model, two repositories.*
+
+A `wg-text-speed` clip was tested and dropped. The one-shot `time wg` result
+stayed around 58 ms, while `time rg` was around 80 ms. That is not the 10x
+rare-term result, so the clip would mislead. The timed comparison remains in the
+launch rg-flags clip.
+
+## Binary and corpus
+
+The checked-in GIFs use the release binary built from `git archive 4e9a8be`:
+
+- Commit: `4e9a8be`
+- Binary SHA-256:
+  `f2eb5ca4977c49cbdbaa4ac272afeeab01519c244db03edaa598aeb1fb521581`
+- Build: `cargo build --locked --release --bin wg -j2`
+- The VPS build target was removed after copying the binary to
+  `/srv/projects/wispd/m/bin/wg-demos`.
+
+The visible roots are under `$HOME/code`, so no `/srv/`, `wispd`, or run-id
+string appears in a recording:
+
+- `$HOME/code/rust`: copy of the Rust `src` corpus.
+- `$HOME/code/live`: copy with an empty `live.rs`.
+- `$HOME/code/api-server`: two small Rust files created by `prepare.sh`.
+
+The one-time `wg up` index build is hidden. The quickstart shows the ready line
+from a visible `wg up` after the hidden build. The multi-repo status shows
+`text: ready [current]` for both roots.
+
+## Render
 
 The checked-in assets are rendered with:
 
 ```sh
-export WG_DEMO_ROOT=/tmp/wg-demos
-export WG_BIN=/path/to/wg
-scripts/render_wg_demos.sh
+export PATH=/srv/projects/wispd/wg-launch-media-20261020/tools/bin:$PATH
+export WG_DEMO_ROOT=/srv/projects/wispd/m/gif-demos
+export WG_BIN=/srv/projects/wispd/m/bin/wg-demos
+export WG_DEMO_CORPUS_SRC=/srv/workspaces/wispd/prof/src
+export WG_DEMO_HOME=$HOME/code
+bash scripts/render_wg_demos.sh
 ```
 
-Run that from the repository root. The script renders each clip into
-`docs/media`, checks the MP4 metadata, and writes end frames and contact sheets
-to `WG_DEMO_ROOT` for review. It uses a short task-owned work directory under
-`/tmp` (override with `WG_DEMO_WORK_ROOT`) so recorded root paths stay readable,
-and it stops the task-owned daemon on exit.
+Run that from the repository root. The script:
 
-To render one clip by hand, use a fresh scratch directory:
+1. copies the corpus to `$HOME/code/rust` and `$HOME/code/live`;
+2. renders the tapes at 1200 px wide with the Catppuccin frame;
+3. converts each MP4 to a looping GIF at 12 fps with a 128-color palette;
+4. audits GIF frames with OCR and fails on `/srv/`, `wispd`, or a run id;
+5. writes the GIFs and MP4s to `docs/media`;
+6. writes final frames and contact sheets to `<run>/review`;
+7. stops every daemon and removes `$HOME/code`.
 
-```sh
-export WG_DEMO_WORK=/tmp/wg-demo-quickstart
-export WG_SERVICE_DIR="$WG_DEMO_WORK/service"
-vhs docs/demos/quickstart.tape
-```
+Requirements: VHS 0.12.1, ttyd 1.7.7, ffmpeg, Chromium, DejaVu Sans Mono, and
+tesseract. Cache the model and parser assets once before recording; the tapes
+run offline.
 
-Set `WG_DEMO_WORK`, `TMPDIR`, model caches, and service state to E: for local
-Windows work. The release recordings run on the authorized Linux VPS, then the
-reviewed assets are copied to the release workspace.
+The tapes are in this directory:
 
-The helper writes only its generated repositories inside `WG_DEMO_WORK`.
-Each tape stops its isolated service. The outer recording runner must also
-stop that service if recording fails.
+- `quickstart.tape`
+- `live.tape`
+- `multi-repo.tape`
+- `prepare.sh`
 
-VHS outputs GIF and MP4 under `docs/media`. Inspect the end frames, contact
-sheets, and `ffprobe` metadata in `WG_DEMO_ROOT` before linking an asset in the
-README. Never substitute echoed results or hard-coded build times.
+`prepare.sh` expects `WG_DEMO_WORK`, `WG_DEMO_CORPUS`, and `WG_BIN`. It creates
+the second repository when `WG_DEMO_SECOND` is set, and empties `live.rs` when
+`WG_DEMO_EMPTY_LIVE=1`.
+
+The final frames and contact sheets are in
+`E:\wg-launch-media\review\gifs\`. Never substitute echoed results or hard-coded
+build times.

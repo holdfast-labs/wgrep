@@ -1,43 +1,45 @@
 Require wg
-Require rg
-Output docs/media/wg-multi-repo.gif
 Output docs/media/wg-multi-repo.mp4
 Set Shell "bash"
 Set Width 1200
-Set Height 800
-Set FontSize 23
-Set FontFamily "JetBrains Mono"
+Set Height 700
+Set FontSize 25
+Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
-Set Padding 26
-Set Margin 18
-Set MarginFill "#1e1e2e"
+Set Padding 16
+Set Margin 10
+Set MarginFill "#181825"
 Set BorderRadius 16
 Set WindowBar Colorful
 Set WindowBarSize 36
-Set TypingSpeed 14ms
+Set TypingSpeed 8ms
 Set Framerate 30
+Set CursorBlink false
 Set PlaybackSpeed 1
-Set WaitTimeout 2m
+Set WaitTimeout 3m
 Hide
 Type "source docs/demos/prepare.sh"
 Enter
+Sleep 1s
+Type "wg up --model code"
+Enter
+Wait+Screen /PID:/
+Wait+Line /\$$/
+Sleep 1s
+Type "clear"
+Enter
 Sleep 500ms
 Show
+Type "cd ../api-server"
+Enter
+Sleep 500ms
 Type "wg up --model code"
 Enter
-Wait+Line /❯\s*$/
-Sleep 700ms
-Type "cd ../search-service"
+Sleep 1500ms
+Type "wg status"
 Enter
-Type "wg up --model code"
-Enter
-Wait+Line /❯\s*$/
-Sleep 700ms
-Type "wg 'decode packet length' -k 1"
-Enter
-Wait+Line /❯\s*$/
-Sleep 1800ms
+Sleep 3500ms
 Hide
 Type "wg down"
 Enter
-Wait+Line /❯\s*$/
+Sleep 1500ms

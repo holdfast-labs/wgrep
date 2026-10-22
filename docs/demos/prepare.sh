@@ -1,35 +1,46 @@
 #!/usr/bin/env bash
-# Source this file from a VHS shell in the package root.
-set -e
-: "${WG_DEMO_WORK:?Set WG_DEMO_WORK to an empty task-owned directory}"
-mkdir -p "$WG_DEMO_WORK"
-test ! -e "$WG_DEMO_WORK/payments-service"
-test ! -e "$WG_DEMO_WORK/search-service"
+# Source this file from a VHS shell in the repository root.
+set -euo pipefail
+
+: "${WG_DEMO_WORK:?Set WG_DEMO_WORK to a task-owned directory}"
+: "${WG_DEMO_CORPUS:?Set WG_DEMO_CORPUS to a task-owned corpus copy}"
+: "${WG_BIN:?Set WG_BIN to the wg binary}"
+
+wg_bin_dir=$(cd "$(dirname "$WG_BIN")" && pwd)
+export PATH="$wg_bin_dir:$PATH"
 export WG_SERVICE_DIR="${WG_SERVICE_DIR:-$WG_DEMO_WORK/service}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
-export WG_DEMO_A="$WG_DEMO_WORK/payments-service"
-export WG_DEMO_B="$WG_DEMO_WORK/search-service"
-mkdir "$WG_DEMO_A" "$WG_DEMO_B"
-cat > "$WG_DEMO_A/auth.rs" <<'EOF'
-// Reject a request when its token is missing.
-pub fn validate_token(token: &str) -> bool {
-    !token.trim().is_empty()
-}
-EOF
-cat > "$WG_DEMO_A/queue.rs" <<'EOF'
+export PS1='\[\e[1;38;5;117m\]$ \[\e[0m\]'
+
+mkdir -p "$WG_DEMO_WORK"
+
+if [[ -n "${WG_DEMO_SECOND:-}" ]]; then
+  mkdir -p "$WG_DEMO_SECOND"
+  cat >"$WG_DEMO_SECOND/queue.rs" <<'EOF'
 // Choose the next queued job.
 pub fn next_job(queue: &mut Vec<String>) -> Option<String> {
     queue.pop()
 }
 EOF
-cat > "$WG_DEMO_B/packet.rs" <<'EOF'
-// Decode the packet length.
-pub fn decode_packet(bytes: &[u8]) -> usize {
-    bytes.len()
+  cat >"$WG_DEMO_SECOND/metrics.rs" <<'EOF'
+// Count completed jobs by status.
+pub fn completed_count(statuses: &[&str]) -> usize {
+    statuses.iter().filter(|s| **s == "done").count()
 }
 EOF
+fi
+
+if [[ "${WG_DEMO_EMPTY_LIVE:-0}" == 1 ]]; then
+  printf '' >"$WG_DEMO_CORPUS/live.rs"
+fi
+
+cleanup() {
+  "$WG_BIN" down >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+cd "$WG_DEMO_CORPUS"
+
+# Keep the interactive shell alive after a no-match command.
 set +e
-export PS1='\[\e[1;38;5;117m\]\W\[\e[0m\] \[\e[38;5;213m\]❯\[\e[0m\] '
-trap 'wg down >/dev/null 2>&1 || true' EXIT
-cd "$WG_DEMO_A"
 clear
