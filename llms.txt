@@ -6,12 +6,17 @@
 
 ## Install
 
-cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
+Download the archive from GitHub Releases. Unpack it, enter the extracted
+directory, and add `bin/` to PATH. The archive contains `bin/wg` or `bin/wg.exe`.
 
 From a checkout: `cargo install --locked --path . --bin wg`.
 
-Requirements: Rust 1.95+, Linux x64 or Windows x64 (macOS is not qualified),
-and network access on the first semantic run for the pinned model and parser
+`cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg`
+works once the repository is public.
+
+Requirements: Rust 1.95+ and a C linker/build tools (`cc` on Linux, MSVC build
+tools on Windows) to build from source. Linux x64 or Windows x64 (macOS is not
+qualified). The first semantic run downloads about 58 MB of model and parser
 assets. No `rg` binary is needed. Release archives ship only the `wg` binary.
 
 ## Docs
@@ -39,8 +44,12 @@ assets. No `rg` binary is needed. Release archives ship only the `wg` binary.
 - The daemon keeps one live semantic index and one trigram text index per
   attached root. One watcher per root feeds both indexes. One model pool is
   shared between roots.
-- The text index skips files that cannot match. It falls back to a full scan
-  when freshness is uncertain or the invocation is not a default walk.
+- The text route runs in the `wg` process. It uses the trigram index only for a
+  default directory walk under an attached root. Flags that change the file set
+  (`-g`, `--hidden`, `--json`, an explicit file) use a full scan. A fallback
+  changes speed, not results.
+- Always give text-route commands an explicit path. With no path, `rg` reads
+  stdin when stdin is a pipe. Use `-` to read stdin on purpose.
 - `--json` alone is a semantic JSON array. `--json` with ripgrep flags is
   ripgrep JSON events.
 - Semantic scope is one whole attached root. A file or subdirectory semantic

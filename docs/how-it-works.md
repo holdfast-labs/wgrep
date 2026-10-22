@@ -1,6 +1,6 @@
 # How wg works
 
-`wg` is one binary with two search routes. Both share one background daemon.
+`wg` is one binary with two search routes. Both can use one background daemon.
 This page explains the main parts for technical readers.
 
 ```mermaid
@@ -150,7 +150,8 @@ it.
 The text route is a real ripgrep run. `wg` passes the original `OsString` argv
 to the vendored ripgrep 15.1 engine in the same process. There is no `rg` child
 and no `rg` on `PATH`. Output, stderr, exit status, ignore rules, encodings, and
-`RIPGREP_CONFIG_PATH` follow rg 15.1.0.
+`RIPGREP_CONFIG_PATH` follow rg 15.1.0. As with rg, a command with no path reads
+stdin when stdin is a pipe. Pass a path in scripts.
 
 ```mermaid
 flowchart LR
@@ -165,10 +166,11 @@ flowchart LR
   F --> G
 ```
 
-`wg up` builds one trigram text index per root. For a text search, the daemon
-returns the files that can contain the pattern. `wg` then runs the real rg
-engine on those files. The index only removes files that cannot match. It never
-changes how a matching file is searched.
+`wg up` builds one trigram text index per root. For a default directory walk
+under an attached root, the daemon returns the files that can contain the
+pattern. `wg` then runs the real rg engine on those files. A flag that changes
+the file set, such as `-g`, uses a full scan. The index only removes files that
+cannot match; it never changes how a matching file is searched.
 
 The client verifies the reply. The invocation must still be a default walk, the
 plan must be enabled, there must be one group per search path in order, and

@@ -42,18 +42,25 @@ Download the archive for your platform from GitHub Releases:
 - Linux x64: `wg-0.1.0-linux-x64.tar.gz`
 - Windows x64: `wg-0.1.0-windows-x64.zip`
 
-The archive contains one binary, `wg`, plus docs, source, and license files.
+Unpack it, enter the extracted directory, then run `bin/wg` on Linux or
+`bin\wg.exe` on Windows, or add `bin/` to `PATH`.
 
-With Rust 1.95 or newer:
+To build from source, use Rust 1.95 or newer and a C linker: `cc` on Linux, or
+the MSVC build tools on Windows.
 
 ```sh
-cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
+cargo install --locked --path . --bin wg
 ```
 
-This command works once the repository is public.
+`cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg`
+works once the repository is public. Until then, use the archive or the `--path`
+form from a clone.
 
-The first semantic run downloads the pinned model and parser assets. Later runs
-use the cache. The text route does not need the model or `rg`.
+The first semantic run downloads about 58 MB of model and parser assets. Later
+runs use the cache. The text route does not need the model or `rg`.
+
+On Windows, PowerShell may show the `wg up` progress line in red. It is progress
+output, not an error.
 
 ## Supported platforms
 
@@ -66,6 +73,8 @@ use the cache. The text route does not need the model or `rg`.
 - Semantic results are ranked, not exhaustive.
 - The text index only removes impossible files. Common terms still scan much of
   the tree.
+- Text-route commands in scripts need an explicit path. With no path, `rg` reads
+  piped stdin and can wait for EOF.
 - Memory does not favor `wg` for many roots. Five attached 13.3k-file roots used
   1,447.5 MiB RSS, against 1,192.0 MiB for five warm sgrep processes (1.21x
   more for `wg`). The sgrep number is a sum of live processes, not a resident

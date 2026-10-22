@@ -21,22 +21,43 @@ between all roots.
 ## Requirements
 
 - Rust 1.95 or newer to build. The crate uses edition 2024.
-- Network access on the first semantic run. `wg` downloads the pinned embedding
-  model and parser assets. Later runs use the local cache.
+- A C linker and standard build tools. On Linux, install `build-essential` or
+  equivalent. On Windows, install the MSVC build tools.
+- Network access on the first semantic run. `wg` downloads about 58 MB of model
+  and parser assets. Later runs use the local cache.
 - Linux x64 or Windows x64. macOS is not qualified yet.
 - No `rg` binary is necessary. `wg` contains ripgrep 15.1.
 
 ## Install
 
+Download the archive for your platform from GitHub Releases. Unpack it and put
+its `bin/` directory on `PATH`:
+
+```sh
+tar -xzf wg-<version>-linux-x64.tar.gz
+cd wg-<version>-linux-x64-*/
+export PATH="$PWD/bin:$PATH"
+wg --version
+```
+
+The extracted directory has a build suffix. On Windows, use `Expand-Archive` on
+the zip, enter the extracted directory, then add its `bin` directory to `PATH`.
+The archive contains `bin/wg` on Linux or `bin/wg.exe` on Windows.
+
+You can also build from source:
+
+```sh
+cargo install --locked --path . --bin wg
+```
+
+The `--git` form below works once the repository is public. Until then, use the
+archive or the `--path` form from a clone.
+
 ```sh
 cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
 ```
 
-From a checkout, run `cargo install --locked --path . --bin wg`.
-
-Release archives are on the GitHub Releases page. Linux and Windows archives
-ship only the `wg` binary. A source build also produces `sgrep` for parity
-checks and `wgrep-sem-shared`.
+A source build also produces `sgrep` for parity checks and `wgrep-sem-shared`.
 
 ## Quick start
 
@@ -58,6 +79,9 @@ The daemon builds asynchronously. The `wg up` client polls status with short
 requests. Ctrl-C stops only the client. The daemon keeps building, and a later
 `wg up` or `wg status` shows the same build.
 
+On Windows, PowerShell may show the `wg up` progress line in red. It is progress
+output, not an error. Use `wg up --json` in scripts.
+
 Then search:
 
 ```sh
@@ -72,8 +96,8 @@ wg -F "fn main" .
 wg -e "fn\s+\w+\(" .
 wg -n -e "TODO" .
 wg -l "deprecated" .
-wg -g "*.rs" "unsafe"
-wg --files
+wg -g "*.rs" "unsafe" .
+wg --files .
 wg --json -F "needle" .                  # ripgrep JSON events
 ```
 
@@ -88,8 +112,10 @@ Output bytes, stderr, exit status, ignore rules, binary handling, encodings, and
 `wg` with a real `rg` 15.1.0 binary.
 
 This route does not need `wg up` or a running daemon. `wg up` is optional here.
-It enables the trigram index for faster searches. You can pipe input the same
-way as ripgrep:
+It enables the trigram index for faster searches.
+
+Always pass a path in scripts and agents. With no path, ripgrep reads stdin when
+stdin is a pipe. This is rg behavior. Use `-` to read stdin on purpose:
 
 ```sh
 cat file.txt | wg -F needle -
@@ -97,10 +123,11 @@ cat file.txt | wg -F needle -
 
 ### The trigram index
 
-`wg up` also builds a trigram index for the root. For a text search, the daemon
-returns the files that can contain the pattern. `wg` then runs the full ripgrep
-engine on those files. The index skips files that cannot match. It does not
-replace the search.
+`wg up` also builds a trigram index for the root. For a default directory walk
+under an attached root, the daemon returns the files that can contain the
+pattern. `wg` then runs the full ripgrep engine on those files. A flag that
+changes the file set, such as `-g`, uses a full scan instead. The index skips
+files that cannot match; it does not replace the search.
 
 The gain is largest for rare or absent terms. On the 13,332-file Rust corpus:
 

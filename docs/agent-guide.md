@@ -7,8 +7,10 @@
 - **Exact text and regex.** A ripgrep flag such as `-F`, `-e`, `-n`, `-l`, `-g`,
   or `--files` runs the built-in ripgrep 15.1 engine.
 
-The text route needs no `rg` binary. Both routes can use one shared daemon. The
-semantic route needs `wg up`. The text route does not.
+The text route needs no `rg` binary. Semantic search uses the shared daemon. The
+text route runs in the `wg` process and can ask the daemon for text-index
+candidates when a root is attached. The semantic route needs `wg up`. The text
+route does not.
 
 ## Choose the route
 
@@ -22,14 +24,19 @@ wg "decodePacketV17" --top 5
 Use the text route when you need exact text, a regex, a complete list, or a
 count:
 
+> **Always pass a path.** With no path, ripgrep reads stdin when stdin is a
+> pipe. That is rg behavior. Agent and CI stdin is often a pipe, so the command
+> can wait for EOF. Pass `.` or another path. On Unix, you can also redirect
+> stdin from `/dev/null`.
+
 ```sh
 wg -F "exact text" .            # literal
 wg -e "regex pattern" .         # regex
 wg -n -e "pattern" .            # line numbers
 wg -l "pattern" .               # file names only
 wg -c "pattern" .               # match counts by file
-wg -g "*.rs" "pattern"          # glob filter
-wg --files                      # list searchable files
+wg -g "*.rs" "pattern" .        # glob filter
+wg --files .                    # list searchable files
 ```
 
 The semantic route is ranked. It can miss a correct answer. Do not use it to
@@ -48,6 +55,9 @@ ready. A later `wg up` in the same root returns fast and reuses the daemon.
 `wg up` is safe under captured output. On Windows, the daemon is detached with
 an explicit handle list and inherits only the log file. A piped or CI-run
 `wg up` returns and releases its pipes. It does not hang the harness.
+
+On Windows, PowerShell may show the `wg up` progress line in red. It is progress
+output, not an error. Use `wg up --json` in scripts.
 
 ## Detect readiness
 
@@ -198,9 +208,10 @@ cap in `wg`. The engine is ripgrep 15.1, so its own limits and behavior apply.
 
 ### Text index and fallbacks
 
-When the root is attached and the text index is trusted, `wg` asks the daemon
-for candidate files. It then runs the full ripgrep engine on those files. The
-index skips files that cannot match. It does not replace the search.
+The index is used for a default directory walk under an attached root. In that
+case, `wg` asks the daemon for candidate files, then runs the full ripgrep
+engine on them. The index only removes files that cannot match. A flag that
+changes the file set, such as `-g`, uses a full scan.
 
 `wg` falls back to a full scan when any of these are true:
 
@@ -252,10 +263,9 @@ accepts files and directories normally.
 - **Untrusted text index:** text searches fall back to a full scan.
   `wg status --json` shows `text.untrusted: true`. Run `wg down`, then `wg up` to
   restore index pruning.
-- **Failed build:** `wg status --json` shows `error`. Run `wg up` twice. The
-  first call clears the failed state and returns the old error. The second call
-  starts a retry.
-  <!-- TODO: remove when single-call retry lands -->
+- **Failed build:** `wg status --json` shows `error`. One `wg up` clears the
+  failed build and starts a new one. If the new build fails, that call returns
+  the new error. Check the cause, then run `wg up` again.
 - **Ctrl-C during `wg up`:** the daemon keeps building. Run `wg status --json`
   or `wg up` again to join the same build.
 - **Model mismatch:** a query that names `code` or `text` must match the model
