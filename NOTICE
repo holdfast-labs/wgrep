@@ -11,6 +11,7 @@ contains `licenses/DEPENDENCY_LICENSES.txt` and the copied license files under
 ## sgrep
 
 Semantic ranking is derived from sgrep, pinned at revision `0fbe8e5`.
+Copyright (c) 2026 mrmps.
 License: MIT. See `LICENSE`.
 
 ## CodeChunker and Kreuzberg portions
