@@ -186,6 +186,15 @@ pub(crate) struct State {
     /// `docs/WGREP_INCREMENTAL_FRESHNESS.md`).
     next_seq: u32,
     dirty: usize,
+    /// Bumped whenever a path enters `added`. A rebuild of added files runs
+    /// only once per value, so files the builder can never index (UTF-16 BOM,
+    /// high-diversity, unreadable) cannot trigger rebuilds forever.
+    added_epoch: u64,
+    /// When the current `added_epoch` was first seen. Waiting [`build::RACY_NS`]
+    /// from here covers the newest added file, whose mtime is no later.
+    added_since: Instant,
+    /// The `added_epoch` value a rebuild last tried to index.
+    added_rebuilt: u64,
     /// Set while a reconcile holds the state lock. The watcher thread reads
     /// this lock-free and drops events instead of blocking on the lock and
     /// piling up an unbounded channel (a reconcile walks and stats the whole
@@ -225,6 +234,9 @@ impl State {
             walks: WalkCounts::default(),
             next_seq: 0,
             dirty: 0,
+            added_epoch: 0,
+            added_since: Instant::now(),
+            added_rebuilt: 0,
             reconciling,
             missed,
             unprunable: false,
@@ -233,10 +245,13 @@ impl State {
 
     /// Live counters for `wg status`.
     pub(crate) fn text_stats(&self) -> serde_json::Value {
+        let rebuild_pending = self.added_epoch != self.added_rebuilt;
         serde_json::json!({
             "files": self.index.file_count(),
             "dirty": self.dirty,
             "added": self.added.len(),
+            "pending": if rebuild_pending { self.added.len() } else { 0 },
+            "unindexed": if rebuild_pending { 0 } else { self.added.len() },
             "needs_rescan": self.needs_rescan,
             "unprunable": self.unprunable,
             "walks": {
@@ -368,13 +383,18 @@ impl State {
                 _ => {
                     // Not in the index: either genuinely new, or deliberately
                     // excluded by the builder (binary, high-diversity, UTF-16
-                    // BOM, racy). Both are searched directly as candidates, so
-                    // they are never a *rebuild* signal: counting them would
-                    // make a tree with any excluded files rebuild forever.
+                    // BOM, racy). Both are searched directly as candidates.
+                    // `added_epoch` is bumped only when a path enters this set;
+                    // one rebuild attempt per epoch stops excluded files from
+                    // making the tree rebuild forever.
                     added.insert(rel, seq);
                 }
             }
             seq = seq.wrapping_add(1);
+        }
+        if added.keys().any(|rel| !self.added.contains_key(rel)) {
+            self.added_epoch = self.added_epoch.wrapping_add(1);
+            self.added_since = Instant::now();
         }
         self.ids = ids;
         self.added = added;
@@ -421,6 +441,8 @@ impl State {
                 if !self.added.contains_key(&rel) {
                     let seq = self.alloc_seq();
                     self.added.insert(rel, seq);
+                    self.added_epoch = self.added_epoch.wrapping_add(1);
+                    self.added_since = Instant::now();
                 }
             }
         }
@@ -1199,6 +1221,9 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
         walks: WalkCounts::default(),
         next_seq: 0,
         dirty: 0,
+        added_epoch: 0,
+        added_since: Instant::now(),
+        added_rebuilt: 0,
         reconciling: reconciling.clone(),
         missed: missed.clone(),
         unprunable: false,
@@ -1590,11 +1615,21 @@ fn rebuild(args: &HiArgs, root: &Path, root_arg: &Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBuf, root_arg: PathBuf) {
-    let mut last = Instant::now();
+    // The first needed rebuild must not wait one full interval; later ones
+    // are still throttled by `REBUILD_INTERVAL`.
+    let mut last = Instant::now()
+        .checked_sub(REBUILD_INTERVAL)
+        .unwrap_or_else(Instant::now);
     loop {
         std::thread::sleep(Duration::from_secs(2));
-        let dirty = state.read().unwrap().dirty;
-        if dirty < REBUILD_MIN_DIRTY || last.elapsed() < REBUILD_INTERVAL {
+        let (dirty, added_epoch, added_due) = {
+            let s = state.read().unwrap();
+            let added_due = !s.added.is_empty()
+                && s.added_epoch != s.added_rebuilt
+                && s.added_since.elapsed() >= Duration::from_nanos(build::RACY_NS as u64);
+            (s.dirty, s.added_epoch, added_due)
+        };
+        if (dirty < REBUILD_MIN_DIRTY && !added_due) || last.elapsed() < REBUILD_INTERVAL {
             continue;
         }
         last = Instant::now();
@@ -1607,9 +1642,26 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
             Ok(index) => {
                 let mut s = state.write().unwrap();
                 s.index = Arc::new(index);
+                // One attempt per set of added files. Files the builder can
+                // never index stay candidates without forcing more rebuilds.
+                // Only record an attempt when the racy window had passed;
+                // a dirty-triggered rebuild before that must not suppress the
+                // later added-files rebuild.
+                if added_due {
+                    s.added_rebuilt = added_epoch;
+                }
                 // Files that changed while the rebuild read them no longer
                 // match its metadata, so they stay dirty.
                 s.flag_rescan(WalkCause::Rebuild);
+                // Rebuild `ids` and `added` against the new generation now
+                // when added files need fresh counts, so status stops
+                // reporting them as pending. With no added files the next
+                // query can reconcile lazily as before.
+                if added_due {
+                    if let Err(err) = s.reconcile() {
+                        eprintln!("wgrep: post-rebuild reconcile failed: {err:#}");
+                    }
+                }
                 eprintln!("wgrep: swapped to {}", file.display());
             }
             Err(err) => eprintln!("wgrep: cannot open rebuilt index: {err}"),
@@ -2003,6 +2055,9 @@ mod tests {
             walks: WalkCounts::default(),
             next_seq: n as u32,
             dirty: 0,
+            added_epoch: 0,
+            added_since: Instant::now(),
+            added_rebuilt: 0,
             reconciling: Arc::new(AtomicBool::new(false)),
             missed: Arc::new(AtomicBool::new(false)),
             unprunable: false,

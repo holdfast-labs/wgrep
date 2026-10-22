@@ -74,6 +74,24 @@ fn run() -> Result<ExitCode> {
     }
 }
 
+fn text_files_text(text: &serde_json::Value) -> String {
+    let indexed = text["indexed"].as_u64().unwrap_or(0);
+    let pending = text["pending"].as_u64().unwrap_or(0);
+    let unindexed = text["unindexed"].as_u64().unwrap_or(0);
+    let total = text["files"].as_u64().unwrap_or(0);
+    if pending == 0 && unindexed == 0 {
+        return format!("{total} files");
+    }
+    let mut detail = vec![format!("{indexed} indexed")];
+    if pending > 0 {
+        detail.push(format!("{pending} pending"));
+    }
+    if unindexed > 0 {
+        detail.push(format!("{unindexed} unindexed"));
+    }
+    format!("{total} files ({})", detail.join(", "))
+}
+
 fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<ExitCode> {
     match name {
         "up" => {
@@ -136,9 +154,9 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                 );
                 if let Some(text) = root.get("text") {
                     println!(
-                        "Text index: {:.2}s | {} files | {:.1} MB on disk | {:.1} MB resident",
+                        "Text index: {:.2}s | {} | {:.1} MB on disk | {:.1} MB resident",
                         text["build_ms"].as_u64().unwrap_or(0) as f64 / 1000.0,
-                        text["files"].as_u64().unwrap_or(0),
+                        text_files_text(text),
                         text["disk_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0,
                         text["resident_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0
                     );
@@ -180,11 +198,22 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                         root["generation"]
                     );
                     if let Some(text) = root.get("text") {
+                        let phase = if text["building"] == true {
+                            "building"
+                        } else if text["needs_rescan"] == true {
+                            "reconciling"
+                        } else {
+                            "current"
+                        };
                         println!(
-                            "  text: {} [{}], {} files, {:.1} MB disk, {:.1} MB resident",
-                            if text["untrusted"] == true { "untrusted" } else { "ready" },
-                            if text["needs_rescan"] == true { "reconciling" } else { "current" },
-                            text["files"].as_u64().unwrap_or(0),
+                            "  text: {} [{}], {}, {:.1} MB disk, {:.1} MB resident",
+                            if text["untrusted"] == true {
+                                "untrusted"
+                            } else {
+                                "ready"
+                            },
+                            phase,
+                            text_files_text(text),
                             text["disk_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0,
                             text["resident_bytes"].as_u64().unwrap_or(0) as f64 / 1_000_000.0
                         );

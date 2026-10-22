@@ -404,6 +404,23 @@ fn request_timeout(v: serde_json::Value, whole: Duration) -> Result<serde_json::
     Ok(r)
 }
 
+/// Status for one text index. The engine reports `files` as the indexed
+/// postings only, and `added` as walked files searched directly. `pending`
+/// means a rebuild will still try those files; `unindexed` means the builder
+/// cannot index them (UTF-16 BOM, high-diversity, unreadable) and they stay
+/// candidates. Report the total the text route knows.
+fn text_status(text: &Arc<TextIndex>) -> serde_json::Value {
+    let mut value = text.status();
+    let indexed = value["files"].as_u64().unwrap_or(0);
+    let added = value["added"].as_u64().unwrap_or(0);
+    let pending = value["pending"].as_u64().unwrap_or(0);
+    value["indexed"] = serde_json::json!(indexed);
+    value["files"] = serde_json::json!(indexed + added);
+    value["building"] =
+        serde_json::json!(pending > 0 || value["needs_rescan"].as_bool().unwrap_or(false));
+    value
+}
+
 fn root_status(path: &Path, root: &Root) -> RootStatus {
     let stats = root.index.stats();
     RootStatus {
@@ -420,7 +437,7 @@ fn root_status(path: &Path, root: &Root) -> RootStatus {
                 .load(Ordering::Acquire)
                 .then(|| "watcher lost trust; run wg down, then wg up".into())
         }),
-        text: root.text.as_ref().map(|t| t.status()),
+        text: root.text.as_ref().map(text_status),
         text_error: root.text_error.clone(),
         text_build_ms: root.text_build_ms,
         build_ms: root.build_ms,
@@ -546,7 +563,7 @@ fn attach(
                 files: stats.files,
                 chunks: stats.chunks,
                 error: None,
-                text: text.as_ref().map(|t| t.status()),
+                text: text.as_ref().map(text_status),
                 text_error,
                 text_build_ms,
                 build_ms: 0,
@@ -815,7 +832,7 @@ fn attach(
         let state = service.state.lock().unwrap();
         let root = state.roots.get(&path).unwrap();
         (
-            root.text.as_ref().map(|t| t.status()),
+            root.text.as_ref().map(text_status),
             root.text_error.clone(),
             root.text_build_ms,
         )

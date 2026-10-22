@@ -316,6 +316,83 @@ fn has(output: &[u8], needle: &str) -> bool {
 }
 
 #[test]
+fn fresh_repo_counts_every_file_in_the_text_status() {
+    let scratch = Scratch::new("fresh-count");
+    scratch.write("src/a.rs", "fn alpha() { let needle = 1; }\n");
+    scratch.write("src/b.rs", "fn beta() { let other = 2; }\n");
+    scratch.write("docs/c.md", "# doc\nno match here\n");
+
+    // No settle delay: the files are in the racy window when `wg up` runs, so
+    // the engine keeps them as added candidates instead of indexed entries.
+    let _daemon = Daemon::start(&scratch, &[]);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut status = wg_command(&scratch);
+        status.args(["status", "--json"]);
+        let status = run_bounded(status, 60);
+        assert!(status.status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&status.stdout).expect("status json");
+        let text = &value["roots"][0]["text"];
+        assert_eq!(
+            text["files"].as_u64(),
+            Some(3),
+            "text status must count every file right after Ready: {text}"
+        );
+        if text["indexed"].as_u64() == Some(3)
+            && text["pending"].as_u64() == Some(0)
+            && text["building"] == false
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "text index did not finish indexing the fresh files: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[test]
+fn fresh_repo_reports_unindexable_files_without_staying_building() {
+    let scratch = Scratch::new("fresh-unindexed");
+    scratch.write("src/a.rs", "fn alpha() { let needle = 1; }\n");
+    scratch.write("src/b.rs", "fn beta() { let other = 2; }\n");
+    // The builder never indexes a UTF-16 BOM file, because rg transcodes it.
+    std::fs::write(
+        scratch.root.join("bom.rs"),
+        [0xFF, 0xFE, b'f', 0, b'n', 0],
+    )
+    .unwrap();
+
+    let _daemon = Daemon::start(&scratch, &[]);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut status = wg_command(&scratch);
+        status.args(["status", "--json"]);
+        let status = run_bounded(status, 60);
+        assert!(status.status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&status.stdout).expect("status json");
+        let text = &value["roots"][0]["text"];
+        assert_eq!(text["files"].as_u64(), Some(3), "wrong total: {text}");
+        if text["indexed"].as_u64() == Some(2)
+            && text["pending"].as_u64() == Some(0)
+            && text["unindexed"].as_u64() == Some(1)
+            && text["building"] == false
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "unindexable file kept the text index building: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[test]
 fn daemon_candidates_match_the_full_scan_and_are_used() {
     let scratch = Scratch::new("parity");
     scratch.fixture();
