@@ -2,16 +2,14 @@ Require wg
 Output docs/media/wg-live.mp4
 Set Shell "bash"
 Set Width 1200
-Set Height 560
+Set Height 178
 Set FontSize 26
 Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
-Set Padding 16
-Set Margin 10
+Set Padding 3
+Set Margin 3
 Set MarginFill "#181825"
-Set BorderRadius 16
-Set WindowBar Colorful
-Set WindowBarSize 36
+Set BorderRadius 8
 Set TypingSpeed 8ms
 Set Framerate 30
 Set CursorBlink false

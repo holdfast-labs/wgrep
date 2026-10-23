@@ -2,16 +2,14 @@ Require wg
 Output docs/media/wg-quickstart.mp4
 Set Shell "bash"
 Set Width 1200
-Set Height 700
-Set FontSize 26
+Set Height 314
+Set FontSize 18
 Set FontFamily "DejaVu Sans Mono"
 Set Theme "Catppuccin Mocha"
-Set Padding 16
-Set Margin 10
+Set Padding 8
+Set Margin 6
 Set MarginFill "#181825"
-Set BorderRadius 16
-Set WindowBar Colorful
-Set WindowBarSize 36
+Set BorderRadius 10
 Set TypingSpeed 8ms
 Set Framerate 30
 Set CursorBlink false
@@ -32,8 +30,9 @@ Sleep 1s
 Type "clear"
 Enter
 Sleep 500ms
-Show
 Type "wg up --model code"
+Show
+Sleep 500ms
 Enter
 Wait+Screen /Text index:/
 Wait+Line /\$$/

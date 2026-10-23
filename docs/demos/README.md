@@ -7,8 +7,8 @@ two-file `api-server` repository. They are not toy fixtures.
 
 | clip | shows | GIF |
 |---|---|---:|
-| `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x700, 12.6 s, 354,046 B |
-| `live` | an edit is searchable before the next prompt | 1200x560, 6.2 s, 147,422 B |
+| `quickstart` | `wg up` ready line, semantic ranking, and a ripgrep flag | 1200x314, 10.8 s, 188,334 B |
+| `live` | an edit is searchable before the next prompt | 1200x178, 6.1 s, 138,275 B |
 | `multi-repo` | two roots behind one daemon and one model | 1200x700, 6.0 s, 285,290 B |
 
 The README captions are:
@@ -26,6 +26,17 @@ launch rg-flags clip.
 
 ## Binary and corpus
 
+The quickstart and live GIFs and MP4s use the release binary built from
+`git archive v0.1.0`:
+
+- Tag: `v0.1.0`
+- Commit: `422eefe`
+- Binary SHA-256:
+  `88df12947478fc32539d8bfc9a537aee6642ae60a27c6e63408cd444ab8a5aa0`
+- Build: `cargo build --locked --release --bin wg -j2`
+- The VPS build target was removed after copying the binary to
+  `/srv/projects/wispd/wg-media-v0.1.0/bin/wg`.
+
 The multi-repo GIF and MP4 use the release binary built from `git archive
 2cee82c`:
 
@@ -36,9 +47,6 @@ The multi-repo GIF and MP4 use the release binary built from `git archive
 - The VPS build target was removed after copying the binary to
   `/srv/projects/wispd/wg-media-2cee82c/bin/wg`.
 
-The quickstart and live GIFs remain from `git archive 4e9a8be` (SHA-256
-`f2eb5ca4977c49cbdbaa4ac272afeeab01519c244db03edaa598aeb1fb521581`).
-
 The visible roots are under `$HOME/code`, so no `/srv/`, `wispd`, or run-id
 string appears in a recording:
 
@@ -47,7 +55,8 @@ string appears in a recording:
 - `$HOME/code/api-server`: two small Rust files created by `prepare.sh`.
 
 The one-time `wg up` index build is hidden. The quickstart shows the ready line
-from a visible `wg up` after the hidden build. The multi-repo status shows
+from a visible `wg up` after the hidden build. That visible `wg up` still shows
+its own short `Preparing wg index` step. The multi-repo status shows
 `text: ready [current]` for both roots.
 
 ## Render
@@ -56,17 +65,20 @@ The checked-in assets are rendered with:
 
 ```sh
 export PATH=/srv/projects/wispd/wg-launch-media-20261020/tools/bin:$PATH
-export WG_DEMO_ROOT=/srv/projects/wispd/wg-media-2cee82c/demo
-export WG_BIN=/srv/projects/wispd/wg-media-2cee82c/bin/wg
+export WG_DEMO_ROOT=/tmp/wg-demo-v010
+export WG_BIN=/srv/projects/wispd/wg-media-v0.1.0/bin/wg
 export WG_DEMO_CORPUS_SRC=/srv/workspaces/wispd/prof/src
 export WG_DEMO_HOME=$HOME/code
 bash scripts/render_wg_demos.sh
 ```
 
-Run that from the repository root. Set `WG_DEMO_ONLY=quickstart` to render one clip. The script:
+Run that from the repository root. Set `WG_DEMO_ONLY=quickstart` to render one
+clip. Set `WG_DEMO_ROOT` to a task-owned directory on local disk; `/tmp` is
+known to work. The script:
 
 1. copies the corpus to `$HOME/code/rust` and `$HOME/code/live`;
-2. renders the tapes at 1200 px wide with the Catppuccin frame;
+2. renders the tapes at 1200 px wide with the Catppuccin frame; the quickstart
+   and live tapes use tight canvases (1200x314 and 1200x178) and no window bar;
 3. converts each MP4 to a looping GIF at 12 fps with a 128-color palette;
 4. audits GIF frames with OCR and fails on `/srv/`, `wispd`, or a run id;
 5. writes the GIFs and MP4s to `docs/media`;
@@ -89,5 +101,6 @@ the second repository when `WG_DEMO_SECOND` is set, and empties `live.rs` when
 `WG_DEMO_EMPTY_LIVE=1`.
 
 The final frames and contact sheets are in
-`E:\wg-launch-media\review\gifs\`. Never substitute echoed results or hard-coded
-build times.
+`E:\wg-launch-media\review\gifs\`. The README key frames (quickstart first,
+middle, and last; live last) are in `E:\wg-launch-media\review\readme-gifs\`.
+Never substitute echoed results or hard-coded build times.

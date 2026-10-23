@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 120" width="330" height="120" role="img" aria-label="wg">
+  <defs><clipPath id="lens"><circle cx="58" cy="54" r="32"/></clipPath></defs>
+  <g clip-path="url(#lens)">
+    <rect x="37" y="35" width="34" height="8" rx="4" fill="#9ca0b0"/>
+    <rect x="37" y="50" width="60" height="8" rx="4" fill="#1e66f5"/>
+    <rect x="37" y="65" width="24" height="8" rx="4" fill="#9ca0b0"/>
+  </g>
+  <circle cx="58" cy="54" r="38" fill="none" stroke="#1e1e2e" stroke-width="10.5"/>
+  <line x1="86" y1="82" x2="108" y2="104" stroke="#1e1e2e" stroke-width="13" stroke-linecap="round"/>
+  <polyline points="138,37 154,86 170,52 186,86 202,37" fill="none" stroke="#1e1e2e" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="248" cy="61" r="24" fill="none" stroke="#1e1e2e" stroke-width="12"/>
+  <path d="M272 37 V88 A26 24 0 0 1 226 103" fill="none" stroke="#1e1e2e" stroke-width="12" stroke-linecap="round"/>
+</svg>
