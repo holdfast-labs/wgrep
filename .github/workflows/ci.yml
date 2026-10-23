@@ -87,12 +87,9 @@ jobs:
       - name: Packaging self-test
         run: ${{ matrix.python }} scripts/wg_release.py self-test --work "${{ runner.temp }}/wg-self-test"
 
-  # Informational only. macOS is not qualified yet, so this job may fail and
-  # must not make CI red. Remove continue-on-error after the first green run.
   macos:
-    name: test (macos-14, informational)
+    name: test (macos-14)
     runs-on: macos-14
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

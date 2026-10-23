@@ -220,11 +220,133 @@ jobs:
           path: ${{ runner.temp }}/out/*
           if-no-files-found: error
 
+  macos:
+    name: ${{ matrix.platform }}
+    needs: preflight
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            platform: macos-arm64
+            rg_asset: ripgrep-15.1.0-aarch64-apple-darwin.tar.gz
+            rg_sha256: 378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715
+            cross: false
+          - target: x86_64-apple-darwin
+            platform: macos-x64
+            rg_asset: ripgrep-15.1.0-x86_64-apple-darwin.tar.gz
+            rg_sha256: 64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882
+            cross: true
+    env:
+      WG_BIN: target/${{ matrix.target }}/release/wg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95"
+
+      - name: Add macOS x86_64 target
+        if: matrix.cross
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build wg
+        run: cargo build --locked --release --bin wg --target "${{ matrix.target }}"
+
+      - name: Check Rosetta 2 for the x86_64 target
+        if: matrix.cross
+        run: |
+          set -euo pipefail
+          if ! arch -x86_64 /usr/bin/true; then
+            echo "::error::Rosetta 2 is not available; cannot smoke-test the x86_64 archive on this runner" >&2
+            exit 1
+          fi
+          arch -x86_64 "${WG_BIN}" --version
+
+      - name: Download and verify ripgrep 15.1.0 (optional parity reference)
+        env:
+          RG_ASSET: ${{ matrix.rg_asset }}
+          RG_SHA256: ${{ matrix.rg_sha256 }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${RG_ASSET}"
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${RG_ASSET}" "${url}"
+          actual=$(shasum -a 256 "${RUNNER_TEMP}/${RG_ASSET}" | awk '{print $1}')
+          if [ "${actual}" != "${RG_SHA256}" ]; then
+            echo "ripgrep SHA-256 mismatch: expected ${RG_SHA256}, got ${actual}" >&2
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/rg"
+          tar --extract --gzip --file "${RUNNER_TEMP}/${RG_ASSET}" \
+            --directory "${RUNNER_TEMP}/rg" --strip-components=1
+          "${RUNNER_TEMP}/rg/rg" --version
+
+      - name: Export source
+        run: python3 scripts/wg_release.py export --out "${RUNNER_TEMP}/export"
+
+      - name: Build archive
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/out"
+          python3 scripts/wg_release.py archive \
+            --wg "${WG_BIN}" \
+            --platform "${{ matrix.platform }}" \
+            --export "${RUNNER_TEMP}/export" \
+            --binary-status final \
+            --label RELEASE \
+            --work "${RUNNER_TEMP}/archive-work" \
+            --out "${RUNNER_TEMP}/out/wg-${WG_TAG#v}-${{ matrix.platform }}.tar.gz"
+
+      - name: Extract archive
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bundle"
+          tar --extract --gzip \
+            --file "${RUNNER_TEMP}/out/wg-${WG_TAG#v}-${{ matrix.platform }}.tar.gz" \
+            --directory "${RUNNER_TEMP}/bundle"
+          bundle=$(find "${RUNNER_TEMP}/bundle" -mindepth 1 -maxdepth 1 -type d)
+          echo "WG_BUNDLE=${bundle}" >> "${GITHUB_ENV}"
+
+      - name: Verify archive checksums
+        run: |
+          set -euo pipefail
+          cd "${WG_BUNDLE}"
+          shasum -a 256 -c PROVENANCE/SHA256SUMS
+
+      - name: Smoke test extracted archive
+        run: |
+          set -euo pipefail
+          # The x86_64 wg and rg binaries run under Rosetta 2. Python stays
+          # native so the runner's arm64 interpreter is always available.
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            arch -x86_64 "${WG_BUNDLE}/bin/wg" --version
+          fi
+          python3 scripts/wg_release.py smoke \
+            --wg "${WG_BUNDLE}/bin/wg" \
+            --rg "${RUNNER_TEMP}/rg/rg" \
+            --work "${RUNNER_TEMP}/smoke" \
+            --timeout 900
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-${{ matrix.platform }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
   publish:
     name: draft release
     needs:
       - linux
       - windows
+      - macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -277,10 +399,3 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
             dist/SHA256SUMS
-
-  # macos:
-  #   # TODO: add an x86_64/aarch64 macOS job after the build and smoke are
-  #   # validated on macOS runners. Do not publish an untested macOS archive.
-  #   runs-on: macos-latest
-  #   steps:
-  #     - run: echo "macOS packaging is not enabled yet"

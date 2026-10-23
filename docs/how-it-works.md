@@ -257,13 +257,17 @@ The harnesses check both routes:
   match.
 - The text index only prunes impossible files. Common terms still scan much of
   the tree.
-- Memory does not favor `wg` with many roots. Five attached 13.3k-file roots
-  used 1,447.5 MiB RSS, against 1,192.0 MiB for five warm sgrep processes. That
-  is 1.21x more for `wg`. The sgrep number is a sum of live processes, not a
-  resident server.
-- A kernel-size tree takes about 10 minutes to attach. One run used a
-  94,318-file Linux tree: 592.3 s (9m 52s), 3,905.7 MiB peak RSS, and 3,387.7
-  MiB steady RSS on a 4-vCPU machine with 7.8 GiB RAM. It was one run.
-- Linux x64 and Windows x64 are supported. macOS is not qualified yet. Current
-  Windows performance was not measured with the launch harness.
+- Memory favors `wg` only at five roots, and the margin is small. Five attached
+  13.3k-file roots used 902.9 MiB RSS, against 1,034.1 MiB for five warm sgrep
+  processes: 12.7% less. This is not a general multi-repo win. At one root `wg`
+  used 282.6 MiB against 249.2 MiB (1.13x more); at three roots 606.9 MiB
+  against 499.8 MiB (1.21x more). The sgrep number is a sum of live processes,
+  not a resident server.
+- A kernel-size tree takes 561.4 s (9m 21s) to attach. One run used a
+  94,318-file Linux tree with 2,774.1 MiB peak RSS and 2,040.5 MiB steady RSS
+  on a 4-vCPU machine with 7.8 GiB RAM. It was one run.
+- Linux x64, Windows x64, macOS arm64, and macOS x64 are supported. All
+  benchmarks are Linux; macOS has no benchmark numbers. On macOS the cache
+  lives in `~/.cache/wgrep`, not `~/Library/Caches`. Current Windows
+  performance was not measured with the launch harness.
 - One daemon holds up to 32 attached roots.

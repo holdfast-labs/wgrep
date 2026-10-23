@@ -1772,23 +1772,25 @@ def run_self_test(args):
     def case_macho_archive():
         repo = make_mini_repo(sandbox / "r-macho")
         export = export_tree(repo, sandbox / "o-macho")
-        wg = fake_binary(sandbox / "wg-macho-archive", "MACHO_ARM64")
-        out = sandbox / "a-macho.tar.gz"
-        ns = argparse.Namespace(
-            work=str(sandbox / "aw-macho"), wg=str(wg), platform="auto",
-            export=str(export.out_dir), repo=str(repo), version="9.9.9",
-            build_id="macho", out=str(out), force=True,
-            binary_status="self-test-fixture", cargo_registry=None, json=False,
-        )
-        cmd_archive(ns)
-        with tarfile.open(out, "r:gz") as tf:
-            names = set(tf.getnames())
-            root = f"wg-9.9.9-macos-arm64-{LABEL}-macho"
-            assert f"{root}/bin/wg" in names, f"missing bin/wg: {sorted(names)[:5]}"
-            assert f"{root}/bin/wg.exe" not in names, "macOS archive contains wg.exe"
-            info = json.loads(tf.extractfile(f"{root}/PROVENANCE/BUILD_INFO.json").read())
-            assert info["platform"] == "macos-arm64", info["platform"]
-        return ("PASS", "macOS arm64 archive uses bin/wg")
+        for kind, expected in (("MACHO_ARM64", "macos-arm64"),
+                               ("MACHO_X64", "macos-x64")):
+            wg = fake_binary(sandbox / f"wg-macho-archive-{expected}", kind)
+            out = sandbox / f"a-macho-{expected}.tar.gz"
+            ns = argparse.Namespace(
+                work=str(sandbox / f"aw-macho-{expected}"), wg=str(wg),
+                platform="auto", export=str(export.out_dir), repo=str(repo),
+                version="9.9.9", build_id="macho", out=str(out), force=True,
+                binary_status="self-test-fixture", cargo_registry=None, json=False,
+            )
+            cmd_archive(ns)
+            with tarfile.open(out, "r:gz") as tf:
+                names = set(tf.getnames())
+                root = f"wg-9.9.9-{expected}-{LABEL}-macho"
+                assert f"{root}/bin/wg" in names, f"missing bin/wg: {sorted(names)[:5]}"
+                assert f"{root}/bin/wg.exe" not in names, "macOS archive contains wg.exe"
+                info = json.loads(tf.extractfile(f"{root}/PROVENANCE/BUILD_INFO.json").read())
+                assert info["platform"] == expected, info["platform"]
+        return ("PASS", "macOS arm64 and x64 archives use bin/wg")
 
     def case_archive_rejects_rg():
         parser = build_parser()
@@ -1880,7 +1882,7 @@ def run_self_test(args):
         ("archive fails when a compiled crate has no license", case_missing_license),
         ("archive refuses OS/label mismatch", case_magic_mismatch),
         ("detects thin and fat Mach-O headers", case_macho_detection),
-        ("archives a Mach-O binary as tar.gz with bin/wg", case_macho_archive),
+        ("archives arm64 and x64 Mach-O binaries as tar.gz with bin/wg", case_macho_archive),
         ("archive rejects removed --rg option", case_archive_rejects_rg),
         ("archive fails on missing --wg", case_missing_binary),
         ("archive refuses existing output file", case_archive_overwrite),

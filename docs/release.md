@@ -18,8 +18,10 @@ CI and release build with Rust `1.95`. This is the `rust-version` in
 - `cargo build --locked --release --bin wg`
 - `python scripts/wg_release.py self-test --work <scratch-dir>`
 
-Jobs run on `ubuntu-latest` and `windows-latest`. Cargo caches are restored by
-`Swatinem/rust-cache`.
+Jobs run on `ubuntu-latest`, `windows-latest`, and `macos-14`. Cargo caches
+are restored by `Swatinem/rust-cache`. The `macos-14` job runs the library,
+binary, parity, and FSEvents tests, builds the release binary, and runs the
+packaging self-test.
 
 ## Release steps
 
@@ -35,21 +37,26 @@ Jobs run on `ubuntu-latest` and `windows-latest`. Cargo caches are restored by
 
 5. The `Release` workflow starts. It also supports manual runs with
    `workflow_dispatch` and an existing tag as input.
-6. Wait for the `preflight`, `linux-x86_64`, and `windows-x86_64` jobs. Each
-   build job builds `wg`, exports the source, and builds the archive with
-   `scripts/wg_release.py`.
+6. Wait for the `preflight`, `linux-x86_64`, `windows-x86_64`, `macos-arm64`,
+   and `macos-x64` jobs. Each build job builds `wg`, exports the source, and
+   builds the archive with `scripts/wg_release.py`.
    The export contains the root crate files, `src/`, `tests/`,
    `crates/wisp-grep/`, `vendor/notify/`, `third_party/`, and `docs/` without
    `docs/launch/`. This source builds with
    `cargo build --locked --release --bin wg`.
-7. The workflow creates a **draft** GitHub Release. It uploads both archives and
-   a `SHA256SUMS` file. The draft body comes from `RELEASE_NOTES.md`; the
-   `publish` job writes `dist/RELEASE_BODY.md` with the `SHA256SUMS` content
-   filled into the Checksums placeholder. It does not publish the release.
+   The macOS matrix runs on `macos-14` (Apple Silicon). The arm64 entry builds
+   natively. The x64 entry adds the `x86_64-apple-darwin` target, builds with
+   `--target x86_64-apple-darwin`, checks Rosetta 2, and runs the x86_64
+   binary under `arch -x86_64` before the smoke test.
+7. The workflow creates a **draft** GitHub Release. It uploads all four
+   archives (Linux, Windows, macOS arm64, and macOS x64) and a `SHA256SUMS`
+   file. The draft body comes from `RELEASE_NOTES.md`; the `publish` job writes
+   `dist/RELEASE_BODY.md` with the `SHA256SUMS` content filled into the
+   Checksums placeholder. It does not publish the release.
 8. Review the draft:
    - confirm the draft body and the filled Checksums block;
-   - confirm the asset names and checksums;
-   - confirm both smoke jobs passed;
+   - confirm the four asset names and checksums;
+   - confirm all four smoke jobs passed;
    - confirm the source commit and tag;
    - publish the draft manually.
 
@@ -83,7 +90,8 @@ explicit: `dist/*.zip`, `dist/*.tar.gz`, `dist/*.sha256`, and
 
 ## Archive contents
 
-The archive ships one binary: `bin/wg` on Linux or `bin/wg.exe` on Windows.
+The archive ships one binary: `bin/wg` on Linux and macOS, or `bin/wg.exe` on
+Windows.
 There is no launcher script and no bundled `rg` binary. ripgrep 15.1.0 is
 compiled into `wg` through `crates/wisp-grep`, and `wg` does not read `WG_RG`.
 Tell users to run `bin/wg` directly or add `bin/` to `PATH`.
@@ -127,9 +135,14 @@ enters `PATH`.
   `1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599`
 - `ripgrep-15.1.0-x86_64-pc-windows-msvc.zip`:
   `124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a`
+- `ripgrep-15.1.0-aarch64-apple-darwin.tar.gz`:
+  `378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715`
+- `ripgrep-15.1.0-x86_64-apple-darwin.tar.gz`:
+  `64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882`
 
 The Linux job uses the musl build for the `x86_64-unknown-linux-gnu` target.
-The binary is static and runs on glibc systems.
+The binary is static and runs on glibc systems. The macOS jobs use the matching
+arm64 or x64 asset. The x64 reference runs under Rosetta 2.
 
 ## What the smoke checks prove
 
@@ -161,9 +174,10 @@ a clean machine. Run a second-person smoke before the first public release.
   `0xcffaedfe`) and fat binaries (`0xcafebabe`). Thin binaries get the
   `macos-x64` or `macos-arm64` platform label. A fat binary gets
   `macos-universal`.
-- macOS jobs are not enabled. A commented stub stays in `release.yml`. A real
-  macOS release job would need a `macos-14` runner, an arm64 or x64 `wg`
-  build, and an archive step with `--platform macos-arm64` or `macos-x64`.
+- The `macos` job is a matrix on `macos-14`. The arm64 entry builds natively.
+  The x64 entry cross-compiles and requires Rosetta 2 for `--version`, archive
+  packaging, and the smoke test. The job fails with a clear error if Rosetta is
+  absent.
 - The workflows were syntax-checked locally. The release body step has not run
   in this environment. The first real run must be watched.
 - The release workflow does not commit, tag, or publish. Those actions stay

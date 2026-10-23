@@ -13,19 +13,19 @@ on `PATH`.
 
 ## Highlights
 
-- **Warm semantic answers:** 23.2 ms p50, against 502.3 ms for the sgrep CLI
-  (21.7x). Top-10 rows and scores matched pinned sgrep on 5/5 queries.
-- **Fresh code:** one-file edit to first correct result, 90.6 ms p50, against
-  20.1 s for sgrep (222x). sgrep has no watcher and rebuilds its index.
-- **Many agents:** 16 concurrent clients reached 149.0 queries/s, against 5.7
-  for sgrep (26.2x), with zero errors.
-- **Exact text, faster on selective terms:** absent terms 4.9 ms vs 52.4 ms for
-  `rg` 15.1 (10.7x); rare terms 5.2 ms vs 52.5 ms (10.1x). Common 41.8 vs
-  67.9 ms; broad 96.6 vs 110.8 ms; case-insensitive 31.7 vs 62.4 ms. Output was
-  byte-identical under `--sort path`.
-- **Large trees:** 13,332 files build in 18.1 s (634.9 MiB peak, 359.4 MiB
-  steady). A 94,318-file Linux tree builds in 592.3 s (9m 52s), with 3,905.7
-  MiB peak and 3,387.7 MiB steady RSS.
+- **Warm semantic answers:** 25.2 ms p50, against 565.7 ms for the sgrep CLI
+  (22.4x). Top-10 rows and scores matched pinned sgrep on 5/5 queries.
+- **Fresh code:** one-file edit to first correct result, 99.2 ms p50, against
+  21.8 s for sgrep (220x). sgrep has no watcher and rebuilds its index.
+- **Many agents:** 16 concurrent clients reached 140.9 queries/s, against 5.5
+  for sgrep (25.4x), with zero errors.
+- **Exact text, faster on selective terms:** absent terms 5.4 ms vs 63.2 ms for
+  `rg` 15.1 (11.7x); rare terms 6.0 ms vs 63.8 ms (10.6x). Common 50.0 vs
+  83.7 ms; broad 111.5 vs 136.1 ms; case-insensitive 37.5 vs 75.7 ms. Output
+  was byte-identical under `--sort path`.
+- **Large trees:** 13,332 files build in 18.4 s (386.2 MiB peak, 212.7 MiB
+  steady). A 94,318-file Linux tree builds in 561.4 s (9m 21s), with 2,774.1
+  MiB peak and 2,040.5 MiB steady RSS.
 
 These values come from one final campaign on one Debian 13 VPS with 4 vCPU,
 7.8 GiB RAM, and no swap. They are single runs, not percentiles over many
@@ -41,20 +41,23 @@ Download the archive for your platform from GitHub Releases:
 
 - Linux x64: `wg-0.1.0-linux-x64.tar.gz`
 - Windows x64: `wg-0.1.0-windows-x64.zip`
+- macOS arm64: `wg-0.1.0-macos-arm64.tar.gz`
+- macOS x64: `wg-0.1.0-macos-x64.tar.gz`
 
-Unpack it, enter the extracted directory, then run `bin/wg` on Linux or
-`bin\wg.exe` on Windows, or add `bin/` to `PATH`.
+Unpack it, enter the extracted directory, then run `bin/wg` on Linux or macOS,
+or `bin\wg.exe` on Windows, or add `bin/` to `PATH`. The macOS x64 archive is
+built by cross-compilation on `macos-14` and smoke-tested under Rosetta 2.
 
-To build from source, use Rust 1.95 or newer and a C linker: `cc` on Linux, or
-the MSVC build tools on Windows.
+To build from source, use Rust 1.95 or newer and a C linker: `cc` on Linux and
+macOS, or the MSVC build tools on Windows.
 
 ```sh
 cargo install --locked --path . --bin wg
 ```
 
-`cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg`
-works once the repository is public. Until then, use the archive or the `--path`
-form from a clone.
+```sh
+cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
+```
 
 The first semantic run downloads about 58 MB of model and parser assets. Later
 runs use the cache. The text route does not need the model or `rg`.
@@ -82,7 +85,12 @@ output, not an error.
 
 - Linux x64
 - Windows x64
-- macOS: not qualified yet
+- macOS arm64 (Apple Silicon). Tested on `macos-14` in CI.
+- macOS x64 (Intel). Built by cross-compilation on `macos-14` and smoke-tested
+  under Rosetta 2 in CI.
+
+macOS has no benchmark numbers; all benchmarks are Linux. On macOS the cache
+lives in `~/.cache/wgrep`, not `~/Library/Caches`.
 
 ## Known limits
 
@@ -91,12 +99,16 @@ output, not an error.
   the tree.
 - Text-route commands in scripts need an explicit path. With no path, `rg` reads
   piped stdin and can wait for EOF.
-- Memory does not favor `wg` for many roots. Five attached 13.3k-file roots used
-  1,447.5 MiB RSS, against 1,192.0 MiB for five warm sgrep processes (1.21x
-  more for `wg`). The sgrep number is a sum of live processes, not a resident
-  server.
-- A kernel-size tree takes about 10 minutes to attach on a 4-vCPU VPS with
-  7.8 GiB RAM.
+- Memory favors `wg` only at five roots, and the margin is small. Five attached
+  13.3k-file roots used 902.9 MiB RSS, against 1,034.1 MiB for five warm sgrep
+  processes: 12.7% less. This is not a general multi-repo win. At one root `wg`
+  used 282.6 MiB against 249.2 MiB (1.13x more); at three roots 606.9 MiB
+  against 499.8 MiB (1.21x more). `wg` stays below the sgrep per-process peak
+  sum at three and five roots. The sgrep number is the sum of live processes,
+  not a resident server. Mapped vector and chunk-text pages count in RSS after a
+  query touches them, until the kernel reclaims them.
+- A kernel-size tree takes 561.4 s (9m 21s) to attach on a 4-vCPU VPS with
+  7.8 GiB RAM, with 2,774.1 MiB peak and 2,040.5 MiB steady RSS.
 - One daemon holds up to 32 attached roots.
 - Semantic paths and arguments must be UTF-8. The text route passes non-UTF-8
   arguments to the engine; index pruning falls back to a full scan.
@@ -104,8 +116,8 @@ output, not an error.
 
 ## Checksums
 
-The release workflow generates `SHA256SUMS` for the Linux and Windows archives
-and attaches it to the release.
+The release workflow generates `SHA256SUMS` for the Linux, Windows, and macOS
+archives and attaches it to the release.
 
 <!-- SHA256SUMS -->
 

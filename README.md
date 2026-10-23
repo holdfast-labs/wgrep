@@ -25,7 +25,7 @@ between all roots.
   equivalent. On Windows, install the MSVC build tools.
 - Network access on the first semantic run. `wg` downloads about 58 MB of model
   and parser assets. Later runs use the local cache.
-- Linux x64 or Windows x64. macOS is not qualified yet.
+- Linux x64, Windows x64, macOS arm64 (Apple Silicon), or macOS x64 (Intel).
 - No `rg` binary is necessary. `wg` contains ripgrep 15.1.
 
 ## Install
@@ -34,15 +34,25 @@ Download the archive for your platform from GitHub Releases. Unpack it and put
 its `bin/` directory on `PATH`:
 
 ```sh
+# Linux x64
 tar -xzf wg-<version>-linux-x64.tar.gz
-cd wg-<version>-linux-x64-*/
+
+# macOS arm64 (Apple Silicon)
+tar -xzf wg-<version>-macos-arm64.tar.gz
+
+# macOS x64 (Intel)
+tar -xzf wg-<version>-macos-x64.tar.gz
+
+cd wg-<version>-<platform>-*/
 export PATH="$PWD/bin:$PATH"
 wg --version
 ```
 
 The extracted directory has a build suffix. On Windows, use `Expand-Archive` on
 the zip, enter the extracted directory, then add its `bin` directory to `PATH`.
-The archive contains `bin/wg` on Linux or `bin/wg.exe` on Windows.
+The archive contains `bin/wg` on Linux and macOS, or `bin/wg.exe` on Windows.
+The macOS x64 archive is built by cross-compilation on `macos-14` and
+smoke-tested under Rosetta 2 in CI.
 
 You can also build from source:
 
@@ -292,9 +302,13 @@ retries it in the same call. That reply reports the new result or the new error.
 
 - Linux x64: supported.
 - Windows x64: supported.
-- macOS: not qualified yet.
+- macOS arm64: supported. Tested on `macos-14` (Apple Silicon) in CI.
+- macOS x64: supported. Built by cross-compilation on `macos-14` and
+  smoke-tested under Rosetta 2 in CI.
 
 Current Windows performance has not been measured with the launch harness.
+macOS has no benchmark numbers; all benchmarks are Linux. On macOS the cache
+lives in `~/.cache/wgrep`, not `~/Library/Caches`.
 
 ## Limits
 

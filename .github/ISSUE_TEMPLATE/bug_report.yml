@@ -23,7 +23,8 @@ body:
       options:
         - Linux x64
         - Windows x64
-        - macOS (not qualified)
+        - macOS arm64
+        - macOS x64
         - Other
     validations:
       required: true
