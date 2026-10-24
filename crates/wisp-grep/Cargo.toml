@@ -74,7 +74,7 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 
 # Used by `detached.rs` to close inherited descriptors on Unix.
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.177"
+libc = "=0.2.191"
 
 # The musl (static) release build uses jemalloc, matching ripgrep's release
 # build; the `#[global_allocator]` in `main.rs` is gated on the same cfg.
