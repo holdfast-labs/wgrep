@@ -11,11 +11,11 @@
 //! guessed from punctuation, and `--` ends option parsing for both routes.
 
 /// Flags `wg` itself accepts with no value.
-const WG_BOOL: &[&str] = &["--json", "--explain", "-h", "--help", "-V", "--version"];
+const WG_BOOL: &[&str] = &["--json", "--explain", "--saturate", "-h", "--help", "-V", "--version"];
 /// Flags `wg` itself accepts with a value.
-const WG_VALUE: &[&str] = &["-k", "--top", "--model", "--cache-dir"];
+const WG_VALUE: &[&str] = &["-k", "--top", "--model", "--cache-dir", "--rank"];
 /// `wg`-owned value flags that have no meaning in the ripgrep route.
-const WG_SEMANTIC_ONLY: &[&str] = &["-k", "--top", "--model", "--explain"];
+const WG_SEMANTIC_ONLY: &[&str] = &["-k", "--top", "--model", "--explain", "--rank"];
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -48,6 +48,10 @@ pub struct Semantic {
     pub json: bool,
     pub explain: bool,
     pub model: String,
+    /// `semantic` (default) or `classic`.
+    pub rank: String,
+    /// Opt-in per-file saturation within the top 10.
+    pub saturate: bool,
 }
 
 /// Classify `args` and lift the global `--cache-dir` out of every route.
@@ -145,6 +149,11 @@ fn classify_inner(args: &[String]) -> Result<(Invocation, Option<String>), Strin
             continue;
         }
         let (name, inline) = split_eq(a);
+        if name == "--explain" || name == "--saturate" {
+            semantic_only = true;
+            i += 1;
+            continue;
+        }
         if WG_BOOL.contains(&name) || name == "--daemon" {
             i += 1;
             continue;
@@ -168,7 +177,7 @@ fn classify_inner(args: &[String]) -> Result<(Invocation, Option<String>), Strin
     if trigger {
         if semantic_only {
             return Err(
-                "cannot combine semantic options (--top/-k/--model/--explain) with ripgrep \
+                "cannot combine semantic options (--top/-k/--model/--explain/--rank) with ripgrep \
                  options; run them as separate commands"
                     .into(),
             );
@@ -292,6 +301,8 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
     let mut json = false;
     let mut explain = false;
     let mut model = "auto".to_owned();
+    let mut rank = "semantic".to_owned();
+    let mut saturate = false;
     let mut i = 0usize;
     let mut dd = false;
     while i < args.len() {
@@ -319,6 +330,11 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
         }
         if a == "--explain" {
             explain = true;
+            i += 1;
+            continue;
+        }
+        if a == "--saturate" {
+            saturate = true;
             i += 1;
             continue;
         }
@@ -367,6 +383,18 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
             i += if inline.is_some() { 1 } else { 2 };
             continue;
         }
+        if name == "--rank" {
+            let value = match inline {
+                Some(v) => v.to_owned(),
+                None => value_at(args, i + 1, "--rank")?,
+            };
+            if !["semantic", "classic"].contains(&value.as_str()) {
+                return Err("--rank must be semantic or classic".into());
+            }
+            rank = value;
+            i += if inline.is_some() { 1 } else { 2 };
+            continue;
+        }
         if a.starts_with('-') && a != "-" {
             // Classification only routes unknown flags to ripgrep, so this is
             // defensive: a wg-owned flag shape that skipped the scanner.
@@ -382,6 +410,9 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
     if explain && !json {
         return Err("--explain requires --json".into());
     }
+    if saturate && rank == "classic" {
+        return Err("--saturate requires --rank semantic".into());
+    }
     Ok(SemanticParse::Args(Semantic {
         query,
         root,
@@ -389,6 +420,8 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
         json,
         explain,
         model,
+        rank,
+        saturate,
     }))
 }
 
@@ -456,6 +489,28 @@ mod tests {
         assert!(s.root.is_none());
         assert_eq!(s.top, 5);
         assert!(!s.json);
+        assert_eq!(s.rank, "semantic");
+        assert!(!s.saturate);
+    }
+
+    #[test]
+    fn rank_mode_and_saturation_are_parsed() {
+        let s = semantic(&["q", "--rank", "classic"]);
+        assert_eq!(s.rank, "classic");
+        assert!(!s.saturate);
+        let s = semantic(&["q", "--rank=semantic", "--saturate"]);
+        assert_eq!(s.rank, "semantic");
+        assert!(s.saturate);
+        let owned: Vec<OsString> = ["q", "--rank", "other"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert!(classify_os(&owned).is_err());
+        let owned: Vec<OsString> = ["q", "--rank", "classic", "--saturate"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert!(classify_os(&owned).is_err());
     }
 
     #[test]

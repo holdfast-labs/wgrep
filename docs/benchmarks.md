@@ -10,16 +10,16 @@ other.
 
 ## Comparison with sgrep (2026-10-22)
 
-`wg` is now one binary: sgrep-identical semantic ranking plus the built-in
-ripgrep 15.1 text route and trigram index in one daemon. This campaign compares
-the final code on the same 13,332-file Rust `src` corpus, model and machine.
-Full method, raw-record paths and caveats are in
-[bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
+`wg` is now one binary: a semantic ranker with an exact `--rank classic`
+sgrep-parity mode, plus the built-in ripgrep 15.1 text route and trigram index
+in one daemon. This campaign compares the final code on the same 13,332-file
+Rust `src` corpus, model and machine. Full method, raw-record paths and caveats
+are in [bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
 
 | Measure | wg | sgrep CLI | Result |
 | --- | ---: | ---: | --- |
 | One-file edit to first correct result, p50 | 99.2 ms | 21,806 ms | 220x faster. sgrep has no watcher and rebuilds its index. |
-| Warm semantic query, p50 | 25.2 ms | 565.7 ms | 22.4x faster. Top-10 rows and scores identical on 5/5 queries. |
+| Warm semantic query, p50 | 25.2 ms | 565.7 ms | 22.4x faster. Top-10 rows and scores identical on 5/5 queries in classic mode. |
 | 16 concurrent clients, throughput | 140.9 q/s | 5.5 q/s | 25.4x. 0 errors or timeouts on either side. |
 | Five attached repositories, RSS | 902.9 MiB | 1,034.1 MiB | wg uses 12.7% less. At 1 and 3 roots wg still uses more. |
 | Text search vs direct `rg 15.1`, p50 | 5.4 / 6.0 / 50.0 / 111.5 / 37.5 ms | 63.2 / 63.8 / 83.7 / 136.1 / 75.7 ms (rg) | Faster on all five cases; byte-identical output. |
@@ -57,7 +57,7 @@ Warm daemon and OS cache, 13,332-file root, `--model code`, top 10.
 
 The row is a declared mixture, not a per-query percentile. Process start,
 loopback IPC, and daemon-side work are included. Top-10 rows and scores were
-identical on 5/5 queries.
+identical to sgrep on 5/5 queries in `--rank classic` mode.
 
 ## Edit-to-first-correct-result latency
 
@@ -70,9 +70,41 @@ that returns the new symbol. 30 samples; warmups excluded.
 | 30 | 84.3 ms | 99.2 ms | 111.9 ms | 115.2 ms | 0 |
 
 The pinned sgrep comparison ran after each sample, outside the interval. It
-rebuilt its whole index in 6 of 6 samples and took 21.8 s at p50. Final results
-also matched a freshly built pinned sgrep index exactly, with no score or
-ordering differences.
+rebuilt its whole index in 6 of 6 samples and took 21.8 s at p50. In `--rank
+classic` mode, final results also matched a freshly built pinned sgrep index
+exactly, with no score or ordering differences.
+
+## Semantic ranking quality: Semble and RepoQA (2026-10-24)
+
+The Semble benchmark is Semble's own benchmark, with Semble's task loader,
+annotations, target matching and NDCG@10 metric. The split below is 31 held-out
+repositories from the 63-repo set; it was fixed before tuning this ranker.
+These held-out repositories were also used to check earlier candidates, so the
+number may be slightly optimistic. The benchmark is Semble's home field, not a
+neutral comparison.
+
+| Ranker | Semble held-out macro NDCG@10 (31 repos) |
+| --- | ---: |
+| `--rank classic` | 0.6867 |
+| default | **0.7609** |
+| Semble itself, all 63 repos | 0.854 |
+
+The default ranker uses file coherence 0.05, whole-query symbol
+definition boost 1.0 (1.5 when the file stem matches), and file-stem/path boost
+0.6. It does not use per-file saturation. `--saturate` is opt-in and was not
+used for these numbers.
+
+On the same held-out RepoQA queries, the default ranker keeps the classic file
+metrics and the line@5 count:
+
+| Ranker | File H@1/5/10 | MRR | Line H@1/5/10 |
+| --- | --- | ---: | --- |
+| `--rank classic` | 202/270/283 | 0.76569 | 156/227/245 |
+| default | 202/270/286 | 0.76699 | 155/227/247 |
+
+The acceptance harness is `bench/WG_RANK_IMPL_EQUIV.py`. It compares the wg CLI
+default with the analysis-tool rows; the method is in
+[bench/WG_RANK3_REPORT.md](../bench/WG_RANK3_REPORT.md).
 
 ## Text route vs direct rg 15.1
 

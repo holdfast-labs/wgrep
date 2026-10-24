@@ -450,9 +450,10 @@ class Runner:
 
     # -- semantic / text /
     def semantic_argv(self, query, root, top, flag='--top'):
+        # The sgrep parity contract applies to the classic ranker only.
         return [self.wg, *self.args.wg_global_args, query, str(root),
-                '--model', self.args.model, '--json', '--explain',
-                flag, str(top)]
+                '--model', self.args.model, '--rank', 'classic', '--json',
+                '--explain', flag, str(top)]
 
     def control_argv(self, query, root, top):
         return [self.sgrep, query, str(root), '--model', self.args.model,

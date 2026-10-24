@@ -20,9 +20,9 @@ flowchart LR
 `src/lexical.rs` classifies the command line before any index work starts. It
 returns `Semantic`, `Lexical`, `Service`, `Daemon`, `Help`, or `Version`.
 
-The classifier knows the flags that `wg` owns: `--json`, `--explain`, `-h`,
-`--help`, `-V`, `--version`, `--top`, `-k`, `--model`, and `--cache-dir`. A flag
-outside that set selects the text route.
+The classifier knows the flags that `wg` owns: `--json`, `--explain`,
+`--saturate`, `-h`, `--help`, `-V`, `--version`, `--top`, `-k`, `--model`,
+`--rank`, and `--cache-dir`. A flag outside that set selects the text route.
 
 A bare `wg PATTERN` has no flags, so it stays semantic. `wg QUERY --json` also
 stays semantic because `--json` alone is a `wg` flag. Add `-F`, `-e`, `-n`,
@@ -30,9 +30,9 @@ stays semantic because `--json` alone is a `wg` flag. Add `-F`, `-e`, `-n`,
 `--` ends option parsing for both routes. `wg -- -F` is a semantic query for the
 text `-F`.
 
-The semantic options `--top`, `-k`, `--model`, and `--explain` do not mix with
-ripgrep flags. `wg` rejects that combination. `-n` is a ripgrep flag, so it
-selects line numbers and the text route.
+The semantic options `--top`, `-k`, `--model`, `--explain`, `--rank`, and
+`--saturate` do not mix with ripgrep flags. `wg` rejects that combination. `-n`
+is a ripgrep flag, so it selects line numbers and the text route.
 
 ## 2. The daemon
 
@@ -105,15 +105,51 @@ query vector and each L2-normalized passage vector, which is cosine similarity.
 
 The ranker keeps the top 200 lexical chunks with a positive score and the top
 200 semantic chunks. It takes their union and adds exact identifier matches.
-Each signal is min-max normalized over that union. The fused score is:
+Each signal is min-max normalized over that union. The base fused score is:
 
 ```text
-fused = 0.25 * bm25_relative + 0.75 * semantic_relative
+base = 0.25 * bm25_relative + 0.75 * semantic_relative
 ```
 
-Exact identifier matches sort first. Ties break by raw BM25. A result contained
-in an earlier result from the same path is removed. The default count is 5;
-`--top` and `-k` allow 1 to 100.
+The default semantic ranker adds three signals to `base`:
+
+```text
+score = base + file_coherence + symbol_definition + file_stem
+```
+
+- **File coherence:** sum `max(base, 0)` per file over the union. The file's
+  best-base chunk gains `0.05 * max_base * file_sum / max_file_sum`.
+- **Symbol definition:** test the trimmed query against Semble's whole-query
+  symbol regex. If it matches, take the last `::`, `\`, `->`, or `.` segment,
+  normalise it (lowercase, remove `_`), and add `1.0` to every chunk whose
+  definition-name set contains it. Multiply by `1.5` when the file stem matches
+  the symbol (exact, underscore-normalised, or plural-tolerant).
+- **File stem/path:** for a non-symbol query, match query words of 3 or more
+  characters against the file stem and parent directory name. Use an exact or
+  3-character prefix match. Let `ratio = matches / keywords`; if
+  `ratio >= 0.10`, add `0.6 * ratio`.
+
+Exact identifier matches still sort first. Ties break by the final score, then
+by raw BM25. A result contained in an earlier result from the same path is
+removed. The default count is 5; `--top` and `-k` allow 1 to 100.
+
+`--rank classic` selects the old ranker: `score = base` and no added signals. It
+is the pinned sgrep path and keeps exact row and score parity.
+
+`--saturate` is opt-in. In the first ten positions, a chunk's effective score is
+`score * 0.5^count[file]`, where `count[file]` is the number of chunks already
+selected from that file. After position ten the raw score is used. This spreads
+results across files. It is off by default.
+
+### Definition index
+
+The definition-name index is part of each chunk record, like its word counts.
+The chunk builder applies the narrow per-language definition regexes and stores
+the normalised full names (lowercase, no `_`). It does not scan chunks at query
+time. The live index rebuilds the names for a file when the watcher applies an
+edit, and for an added file when it reconciles. A deleted file removes its names
+with its chunks. A snapshot cache load rebuilds the names from the stored chunk
+text, so a warm start has the same index as a cold build.
 
 ### Model and lexical index
 
@@ -149,18 +185,21 @@ allows it.
 
 ### Why parity holds
 
-The core is copied from pinned sgrep revision `0fbe8e5`. It keeps the upstream
-chunking, lexical, BM25, cosine, fusion, dedup, and tie logic. The live route
-calls the same rank function.
+The classic core is copied from pinned sgrep revision `0fbe8e5`. It keeps the
+upstream chunking, lexical, BM25, cosine, fusion, dedup, and tie logic. The live
+route calls the same rank function in `--rank classic` mode.
 The compact BM25 path keeps the same term order and the same `f64` addition
 order as the original scan, including negative zero. That matters for
 `total_cmp` tie breaks and exact output.
 
-The parity harness compares ordered rows and finite scores with no tolerance.
-On the launch corpus, the top 10 rows and scores matched on 5 of 5 queries. The
-quality report also matches pinned sgrep on RepoQA 600 and CoSQA 500. This is
-exact for the tested code, model, and corpus. A model or rank change can break
-it.
+The parity harness compares ordered rows and finite scores with no tolerance in
+classic mode. On the launch corpus, the top 10 rows and scores matched on 5 of 5
+queries. The quality report also matches pinned sgrep on RepoQA 600 and CoSQA
+500 in classic mode. This is exact for the tested code, model, and corpus. A
+model or rank change can break it.
+
+The default semantic ranker is intentionally a different score. Its acceptance
+check is the analysis tool's rows (`bench/WG_RANK3_REPORT.md`), not sgrep.
 
 ## 4. Text route
 

@@ -3,7 +3,7 @@
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use wgrep::live::{BuildProgress, LiveIndex, ModelPool};
-use wgrep::{ModelChoice, Result};
+use wgrep::{ModelChoice, RankMode, Result};
 use wisp_grep::text::{TextGroup, TextIndex, TextPlan};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -1037,6 +1037,15 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 return Err("result count must be between 1 and 100".into());
             }
             let n = n as usize;
+            let rank = match req["rank"].as_str().unwrap_or("semantic") {
+                "semantic" => RankMode::Semantic,
+                "classic" => RankMode::Classic,
+                _ => return Err("rank must be semantic or classic".into()),
+            };
+            let saturate = req["saturate"] == true;
+            if saturate && rank == RankMode::Classic {
+                return Err("saturation requires the semantic ranking mode".into());
+            }
             let (root, index, pending, lost) = {
                 let state = service.state.lock().unwrap();
                 let root = state
@@ -1086,7 +1095,7 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
             loop {
                 wait_root(service, &root, &pending, &lost, deadline)?;
                 let generation = index.stats().generation;
-                let rows = index.query(query, n, req["explain"] == true)?;
+                let rows = index.query_with_mode(query, n, req["explain"] == true, rank, saturate)?;
                 wait_root(service, &root, &pending, &lost, deadline)?;
                 if generation == index.stats().generation {
                     return Ok(serde_json::json!({"ok":true,"results":rows}));
@@ -1284,6 +1293,7 @@ fn spawn(cache: Option<PathBuf>) -> Result<wisp_grep::detached::DetachedChild> {
     // inherit the caller's stdout pipe, or a piped `wg up` never sees EOF.
     Ok(wisp_grep::detached::spawn(&exe, &args, &log_path)?)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn query(
     query: &str,
     path: &Path,
@@ -1291,12 +1301,14 @@ pub fn query(
     n: usize,
     explain: bool,
     model: &str,
+    rank: &str,
+    saturate: bool,
 ) -> Result<serde_json::Value> {
     load_metadata().map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
         "no wg service is running for this cache; run `wg up` first".into()
     })?;
     request(
-        serde_json::json!({"op":"query","query":query,"path":path,"whole_repo":whole_repo,"top_n":n,"explain":explain,"model":model}),
+        serde_json::json!({"op":"query","query":query,"path":path,"whole_repo":whole_repo,"top_n":n,"explain":explain,"model":model,"rank":rank,"saturate":saturate}),
     )
 }
 

@@ -146,11 +146,17 @@ wg "where do we validate incoming requests" --top 10
 wg "decodePacketV17" --top 5
 wg "packet framing" --json --top 20
 wg "packet framing" --json --explain --top 5
+wg "packet framing" --rank classic --top 5
+wg "packet framing" --saturate --top 10
 ```
 
 - `--top N` / `-k N` sets the count. The range is 1 to 100. The default is 5.
 - `--json` alone prints a semantic JSON array.
 - `--explain` adds score fields and requires `--json`.
+- `--rank semantic|classic` selects the ranker. `semantic` is the default.
+  `classic` is the pinned sgrep ranker for exact parity.
+- `--saturate` turns on opt-in per-file diversity in the first ten positions.
+  It applies only to `--rank semantic`.
 - `--model auto|code|text` selects the embedding policy. `auto` is the default.
   A query that names `code` or `text` must match the model used by `wg up`.
   `auto` does not enforce a model. The model is fixed at `wg up`. A mismatch
@@ -161,16 +167,40 @@ Semantic search is ranked, not exhaustive. `wg` fuses a lexical candidate set
 and a semantic candidate set, then returns a ranked shortlist. A correct answer
 can fall outside the shortlist. Use `-F` or `-e` when you need every match.
 
+The default ranker is not the old sgrep score. It adds three signals to the
+fused base score:
+
+- **File coherence:** the best chunk of a file gains a small share of that
+  file's total candidate score.
+- **Whole-query symbol definitions:** when the whole query is a symbol, chunks
+  that define it get a boost. The boost is 1.5x when the file stem matches the
+  symbol.
+- **Natural-language file-stem/path:** query words of 3 or more characters are
+  matched against the file stem and parent directory. A match adds a boost
+  scaled by the match ratio.
+
+`--json --explain` shows the added `coherence`, `symbol`, and `stem` fields on
+each row. It also shows `saturation` when `--saturate` is on. Existing fields
+keep their names and meanings.
+
+`--saturate` keeps the first chunk of a file at full score and multiplies the
+k-th repeat chunk by `0.5^k` inside the first ten positions. Later positions use
+the raw score. It is off by default.
+
+`--rank classic` keeps the pinned sgrep ranking. In that mode the output rows
+and scores are identical to revision `0fbe8e5`. The parity claim applies to
+classic mode only.
+
 Semantic scope is one whole attached root. Without `ROOT`, `wg` uses the nearest
 attached ancestor of the current directory. A file or subdirectory `ROOT`
 returns an explicit error. The text route accepts files and directories
 normally.
 
-The ranker is sgrep-compatible. On the launch corpus, warm top-10 rows and
-scores were identical to pinned sgrep on 5 of 5 queries. Warm semantic latency
-was 25.2 ms p50 for `wg` and 565.7 ms p50 for the sgrep CLI, 22.4x faster. This
-was a five-query mixture on one machine. The sgrep CLI pays process start and
-asset load on each call.
+The classic ranker is sgrep-compatible. On the launch corpus, warm top-10 rows
+and scores were identical to pinned sgrep on 5 of 5 queries. Warm semantic
+latency was 25.2 ms p50 for `wg` and 565.7 ms p50 for the sgrep CLI, 22.4x
+faster. This was a five-query mixture on one machine. The sgrep CLI pays
+process start and asset load on each call.
 
 With 16 concurrent clients, `wg` reached 140.9 queries/s against 5.5 for sgrep,
 with zero errors. The test used 10-second windows on 4 shared vCPU.

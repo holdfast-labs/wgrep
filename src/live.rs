@@ -1,7 +1,7 @@
 //! Mutable, atomically published sgrep-compatible corpus snapshots.
 use crate::{
-    CODE, Chunk, LoadedModel, ModelChoice, Result, TEXT, cache, identifier_pattern, is_prose,
-    make_chunk, rank_impl, words,
+    CODE, Chunk, LoadedModel, ModelChoice, RankMode, Result, TEXT, cache, identifier_pattern,
+    is_prose, make_chunk, rank_impl, words,
 };
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
@@ -2276,6 +2276,7 @@ impl LiveIndex {
                                 end: chunk.end,
                                 content,
                                 counts: HashMap::new(),
+                                definitions: chunk.definitions.clone(),
                                 scores: None,
                             });
                             chunks[start + i] = replacement.clone();
@@ -2621,6 +2622,7 @@ impl LiveIndex {
                             end: chunk.end,
                             content,
                             counts: HashMap::new(),
+                            definitions: chunk.definitions.clone(),
                             scores: None,
                         }));
                     }
@@ -2819,7 +2821,24 @@ impl LiveIndex {
         Ok(normalize(rel))
     }
 
+    /// Query with the semantic (`no sat`) ranking default.
     pub fn query(&self, query: &str, top_n: usize, explain: bool) -> Result<Vec<Chunk>> {
+        self.query_with_mode(query, top_n, explain, RankMode::Semantic, false)
+    }
+
+    /// Query with an explicit ranking mode. `saturate` only applies to
+    /// [`RankMode::Semantic`].
+    pub fn query_with_mode(
+        &self,
+        query: &str,
+        top_n: usize,
+        explain: bool,
+        mode: RankMode,
+        saturate: bool,
+    ) -> Result<Vec<Chunk>> {
+        if saturate && mode == RankMode::Classic {
+            return Err("saturation requires the semantic ranking mode".into());
+        }
         let snapshot = self
             .snapshot
             .read()
@@ -2862,6 +2881,10 @@ impl LiveIndex {
             false,
             explain,
             top_n,
+            query,
+            mode,
+            saturate,
+            &snapshot.chunks,
             // Clone only the rows that ranking actually returns.
             |i| Ok((*snapshot.chunks[i]).clone()),
         )
@@ -3134,6 +3157,55 @@ mod tests {
         live.refresh(&[], true).unwrap();
         equal_fresh(&root, &live, &pool);
         assert_eq!(live.stats().files, 2);
+    }
+
+    #[test]
+    fn definition_index_follows_live_edits_adds_and_deletes() {
+        let (_dir, root) = fixture();
+        let pool = Arc::new(ModelPool::new(None));
+        let live = LiveIndex::open(&root, ModelChoice::Code, pool).unwrap();
+        let before = live.query("foo_bar", 10, true).unwrap();
+        assert!(
+            before
+                .iter()
+                .all(|c| c.scores.as_ref().and_then(|s| s.symbol).unwrap_or(0.0) == 0.0),
+            "no chunk defines foo_bar yet"
+        );
+
+        // An edit through the watcher's apply path rebuilds only that file.
+        std::fs::write(
+            root.join("a.rs"),
+            "fn foo_bar() {\n    let fresh_value = 1;\n}\n",
+        )
+        .unwrap();
+        live.refresh(&[root.join("a.rs")], false).unwrap();
+        let after = live.query("foo_bar", 10, true).unwrap();
+        assert_eq!(&*after[0].path, "a.rs");
+        assert!(after[0].content.as_str().contains("foo_bar"));
+        assert_eq!(after[0].scores.as_ref().unwrap().symbol, Some(1.0));
+        assert!(
+            file_chunks(&live, "a.rs")
+                .iter()
+                .any(|c| c.definitions.iter().any(|n| n == "foobar")),
+            "the new definition must be in the resident chunk index"
+        );
+
+        // An added file arrives through the watcher's reconcile pass.
+        std::fs::write(root.join("c.rs"), "fn baz_qux() {}\n").unwrap();
+        live.refresh(&[], true).unwrap();
+        let added = live.query("baz_qux", 10, true).unwrap();
+        assert_eq!(&*added[0].path, "c.rs");
+        assert_eq!(added[0].scores.as_ref().unwrap().symbol, Some(1.0));
+
+        // A deleted file can no longer supply the definition.
+        std::fs::remove_file(root.join("a.rs")).unwrap();
+        live.refresh(&[], true).unwrap();
+        assert!(
+            live.query("foo_bar", 10, true)
+                .unwrap()
+                .iter()
+                .all(|c| &*c.path != "a.rs")
+        );
     }
 
     #[test]

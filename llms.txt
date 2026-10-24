@@ -1,8 +1,8 @@
 # wg
 
-> One local binary for sgrep-compatible semantic code search and exact
-> ripgrep-compatible text search, with one shared daemon for semantic search
-> and text-index pruning.
+> One local binary for semantic code search, a classic sgrep ranking mode,
+> and exact ripgrep-compatible text search, with one shared daemon for
+> semantic search and text-index pruning.
 
 ## Install
 
@@ -30,15 +30,17 @@ No `rg` binary is needed. Release archives ship only the `wg` binary.
 ## Commands
 
 - wg up [PATH] [--model auto|code|text] [--json]
-- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text]
+- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text] [--rank semantic|classic] [--saturate]
 - wg [RIPGREP-FLAGS] PATTERN [PATH...]
 - wg status [--json]
 - wg down
 
 ## Contract
 
-- Default route is sgrep-compatible semantic ranking. The parity reference is
-  pinned sgrep revision `0fbe8e5`. Results are ranked, not exhaustive.
+- Default route is semantic ranking. The default ranker adds file coherence,
+  whole-query symbol definition and file-stem boosts. `--rank classic` selects
+  the pinned sgrep revision `0fbe8e5` ranker for exact parity. Results are
+  ranked, not exhaustive. `--saturate` is an opt-in per-file diversity flag.
   `--top N` / `-k N` sets the count (1..=100, default 5).
 - A ripgrep flag (`-F`, `-e`, `-n`, `-l`, `-g`, `--files`, and others) selects
   the in-process ripgrep 15.1 engine. Output, exit status, ignore rules, and

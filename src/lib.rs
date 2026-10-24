@@ -19,6 +19,7 @@
 mod cache;
 mod codechunker;
 mod index;
+mod rank_signals;
 mod rg_input;
 // M4 immutable-snapshot prototype: a manual-start shared daemon and client
 // around the resident core. It is a separate binary (`wgrep-sem-shared`) and
@@ -154,6 +155,18 @@ pub enum ModelChoice {
     Text,
 }
 
+/// Ranking mode for the fused semantic results.
+///
+/// `Semantic` is the user-facing default: the `no sat` ranker (file
+/// coherence, whole-query symbol definition boost, and the natural-language
+/// file-stem/path boost). `Classic` is the pinned sgrep ranker, kept for exact
+/// parity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum RankMode {
+    Semantic,
+    Classic,
+}
+
 static CAMEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]+").unwrap());
 static STOP: LazyLock<HashSet<&str>> = LazyLock::new(|| {
@@ -197,6 +210,12 @@ pub struct Args {
     /// Include lexical, semantic and fused scores in JSON output.
     #[arg(long, requires = "json")]
     explain: bool,
+    /// Ranking mode: the semantic default or the classic sgrep parity ranker.
+    #[arg(long, value_enum, default_value_t = RankMode::Classic)]
+    rank: RankMode,
+    /// Decay repeated chunks of one file in the top 10 (semantic mode only).
+    #[arg(long)]
+    saturate: bool,
 }
 
 /// Chunk text storage. A live index keeps the base snapshot's text in the same
@@ -322,6 +341,11 @@ pub struct Chunk {
     pub content: ChunkText,
     #[serde(skip)]
     pub counts: HashMap<String, usize>,
+    /// Normalised narrow definition names declared by this chunk. Like
+    /// `counts`, this is index state: it is rebuilt with the chunk and never
+    /// serialized into query output or the snapshot cache.
+    #[serde(skip)]
+    pub definitions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<Scores>,
 }
@@ -334,6 +358,18 @@ pub struct Scores {
     pub semantic_relative: f64,
     pub fused: f64,
     pub exact_identifier: bool,
+    /// Multi-chunk file coherence boost (semantic mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence: Option<f64>,
+    /// Whole-query symbol definition boost, including the file-stem factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<f64>,
+    /// Natural-language file-stem/parent-directory boost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stem: Option<f64>,
+    /// Per-file saturation factor applied during selection (opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saturation: Option<f64>,
 }
 
 pub fn identifier_pattern(query: &str) -> Result<Option<(Regex, Vec<&str>)>> {
@@ -472,13 +508,60 @@ pub fn make_chunk_content<P: Into<SharedStr>>(
     for word in words(content.as_str()).into_iter().chain(words(&path)) {
         *counts.entry(word).or_insert(0) += 1;
     }
+    let definitions = rank_signals::definition_names(&path, content.as_str());
     Chunk {
         path,
         start,
         end,
         content,
         counts,
+        definitions,
         scores: None,
+    }
+}
+
+/// Read-only row view used by the ranker. `Chunk` owns the data; the live
+/// index holds `Arc<Chunk>`.
+pub(crate) trait RankRow {
+    fn rank_path(&self) -> &str;
+    fn rank_definitions(&self) -> &[String];
+    fn rank_start(&self) -> usize;
+    fn rank_end(&self) -> usize;
+}
+
+impl RankRow for Chunk {
+    fn rank_path(&self) -> &str {
+        &self.path
+    }
+
+    fn rank_definitions(&self) -> &[String] {
+        &self.definitions
+    }
+
+    fn rank_start(&self) -> usize {
+        self.start
+    }
+
+    fn rank_end(&self) -> usize {
+        self.end
+    }
+}
+
+impl RankRow for std::sync::Arc<Chunk> {
+    fn rank_path(&self) -> &str {
+        &self.path
+    }
+
+    fn rank_definitions(&self) -> &[String] {
+        &self.definitions
+    }
+
+    fn rank_start(&self) -> usize {
+        self.start
+    }
+
+    fn rank_end(&self) -> usize {
+        self.end
     }
 }
 
@@ -788,6 +871,11 @@ pub fn search(args: &Args) -> Result<Vec<Chunk>> {
         && !args.fresh_assets
         && !args.stdin
         && args.rg_json.is_none()
+        // The one-shot semantic ranker needs per-chunk definition names,
+        // which the classic index cache does not store. The `wg` service
+        // builds its live snapshot instead, so only the explicit sgrep
+        // semantic flag takes this slower path.
+        && args.rank == RankMode::Classic
         && let Some(results) = index::search(args, &path, &terms, &cache)?
     {
         return Ok(results);
@@ -848,7 +936,6 @@ pub fn search(args: &Args) -> Result<Vec<Chunk>> {
                 .filter_map(move |(i, chunk)| pattern.is_match(&chunk.content).then_some(i))
         })
         .collect();
-    let mut chunks: Vec<_> = chunks.into_iter().map(Some).collect();
     rank(
         args,
         corpus_len,
@@ -856,19 +943,24 @@ pub fn search(args: &Args) -> Result<Vec<Chunk>> {
         &similarities,
         supplied,
         &exact,
-        |i| Ok(chunks[i].take().unwrap()),
+        &chunks,
+        |i| Ok(chunks[i].clone()),
     )
 }
 
-fn rank(
+fn rank<R: RankRow>(
     args: &Args,
     corpus_len: usize,
     lexical: &[f64],
     similarities: &[f64],
     supplied: Vec<usize>,
     exact: &HashSet<usize>,
+    rows: &[R],
     get_chunk: impl FnMut(usize) -> Result<Chunk>,
 ) -> Result<Vec<Chunk>> {
+    if args.saturate && args.rank == RankMode::Classic {
+        return Err("--saturate requires the semantic ranking mode".into());
+    }
     rank_impl(
         corpus_len,
         lexical,
@@ -878,12 +970,16 @@ fn rank(
         args.stdin,
         args.explain,
         args.count as usize,
+        &args.query,
+        args.rank,
+        args.saturate,
+        rows,
         get_chunk,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rank_impl(
+fn rank_impl<R: RankRow>(
     corpus_len: usize,
     lexical: &[f64],
     similarities: &[f64],
@@ -892,8 +988,15 @@ fn rank_impl(
     stdin: bool,
     explain: bool,
     top_n: usize,
+    query: &str,
+    mode: RankMode,
+    saturate: bool,
+    rows: &[R],
     mut get_chunk: impl FnMut(usize) -> Result<Chunk>,
 ) -> Result<Vec<Chunk>> {
+    if saturate && mode == RankMode::Classic {
+        return Err("saturation requires the semantic ranking mode".into());
+    }
     let mut order: Vec<_> = if stdin {
         (0..lexical.len()).collect()
     } else {
@@ -916,38 +1019,225 @@ fn rank_impl(
     let bm25_scores: Vec<_> = order.iter().map(|&i| lexical[i]).collect();
     let bm25_relative = relative_scores(&bm25_scores);
     let semantic_relative = relative_scores(&semantic);
-    let score = |i: usize| 0.25 * bm25_relative[i] + 0.75 * semantic_relative[i];
-    let mut fused: Vec<_> = (0..order.len()).collect();
-    fused.sort_by(|&a, &b| {
-        exact
-            .contains(&order[b])
-            .cmp(&exact.contains(&order[a]))
-            .then_with(|| score(b).total_cmp(&score(a)))
-            .then_with(|| bm25_scores[b].total_cmp(&bm25_scores[a]))
-    });
-    let mut results: Vec<Chunk> = Vec::new();
-    for i in fused {
-        let mut chunk = get_chunk(order[i])?;
-        if explain {
-            chunk.scores = Some(Scores {
-                bm25: bm25_scores[i],
-                semantic: semantic[i],
-                bm25_relative: bm25_relative[i],
-                semantic_relative: semantic_relative[i],
-                fused: score(i),
-                exact_identifier: exact.contains(&order[i]),
-            });
-        }
-        if results
+    let base_scores: Vec<f64> = (0..order.len())
+        .map(|i| 0.25 * bm25_relative[i] + 0.75 * semantic_relative[i])
+        .collect();
+
+    let new_rank = mode == RankMode::Semantic;
+    let (coherence, symbol, stem) = if new_rank {
+        let max_base = base_scores
             .iter()
-            .any(|c| c.path == chunk.path && c.start <= chunk.start && chunk.end <= c.end)
-        {
-            continue;
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+            .max(0.0);
+        let paths: Vec<&str> = order.iter().map(|&i| rows[i].rank_path()).collect();
+        let coherence = rank_signals::coherence_boosts(&paths, &base_scores, 0.05, max_base);
+
+        let sym_query = rank_signals::is_symbol_query(query);
+        let symbol: Vec<f64> = if sym_query {
+            let sym_name = rank_signals::symbol_name(query);
+            let sym_norm = rank_signals::normalise_name(&sym_name);
+            order
+                .iter()
+                .map(|&i| {
+                    if rows[i]
+                        .rank_definitions()
+                        .iter()
+                        .any(|name| name == &sym_norm)
+                    {
+                        if rank_signals::file_stem_matches(rows[i].rank_path(), &sym_name) {
+                            1.0 * 1.5
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        } else {
+            vec![0.0; order.len()]
+        };
+
+        let stem: Vec<f64> = if sym_query {
+            vec![0.0; order.len()]
+        } else {
+            let keywords = rank_signals::stem_keywords(query);
+            let mut cache = HashMap::new();
+            order
+                .iter()
+                .map(|&i| {
+                    0.6 * rank_signals::stem_path_score(
+                        rows[i].rank_path(),
+                        &keywords,
+                        &mut cache,
+                    )
+                })
+                .collect()
+        };
+        (coherence, symbol, stem)
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+
+    let score_at = |i: usize| -> f64 {
+        if new_rank {
+            base_scores[i] + coherence[i] + stem[i] + symbol[i]
+        } else {
+            base_scores[i]
         }
-        results.push(chunk);
-        if results.len() == top_n {
+    };
+    let scores_at = |i: usize, decay: Option<f64>| -> Scores {
+        let (coherence, symbol, stem) = if new_rank {
+            (Some(coherence[i]), Some(symbol[i]), Some(stem[i]))
+        } else {
+            (None, None, None)
+        };
+        Scores {
+            bm25: bm25_scores[i],
+            semantic: semantic[i],
+            bm25_relative: bm25_relative[i],
+            semantic_relative: semantic_relative[i],
+            fused: score_at(i),
+            exact_identifier: exact.contains(&order[i]),
+            coherence,
+            symbol,
+            stem,
+            saturation: decay,
+        }
+    };
+
+    let mut results: Vec<Chunk> = Vec::new();
+    if !new_rank || !saturate {
+        let mut fused: Vec<_> = (0..order.len()).collect();
+        fused.sort_by(|&a, &b| {
+            exact
+                .contains(&order[b])
+                .cmp(&exact.contains(&order[a]))
+                .then_with(|| score_at(b).total_cmp(&score_at(a)))
+                .then_with(|| bm25_scores[b].total_cmp(&bm25_scores[a]))
+        });
+        for i in fused {
+            let mut chunk = get_chunk(order[i])?;
+            if explain {
+                chunk.scores = Some(scores_at(i, None));
+            }
+            if results
+                .iter()
+                .any(|c| c.path == chunk.path && c.start <= chunk.start && chunk.end <= c.end)
+            {
+                continue;
+            }
+            results.push(chunk);
+            if results.len() == top_n {
+                break;
+            }
+        }
+        return Ok(results);
+    }
+
+    // Opt-in per-file saturation: keep the first chunk of a file at full
+    // score and multiply the k-th repeat by 0.5^k. The decay window is the
+    // first ten positions; later positions use the raw score.
+    const SAT: f64 = 0.5;
+    const SAT_WINDOW: usize = 10;
+    let mut taken = vec![false; order.len()];
+    let mut file_count: HashMap<&str, usize> = HashMap::new();
+    let mut by_path: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    while results.len() < top_n {
+        if results.len() >= SAT_WINDOW {
+            let mut rest: Vec<usize> = (0..order.len()).filter(|&j| !taken[j]).collect();
+            rest.sort_by(|&a, &b| {
+                exact
+                    .contains(&order[b])
+                    .cmp(&exact.contains(&order[a]))
+                    .then_with(|| score_at(b).total_cmp(&score_at(a)))
+                    .then_with(|| bm25_scores[b].total_cmp(&bm25_scores[a]))
+            });
+            for j in rest {
+                let i = order[j];
+                let path = rows[i].rank_path();
+                if let Some(spans) = by_path.get(path) {
+                    if spans
+                        .iter()
+                        .any(|&(s, e)| s <= rows[i].rank_start() && rows[i].rank_end() <= e)
+                    {
+                        continue;
+                    }
+                }
+                by_path
+                    .entry(path)
+                    .or_default()
+                    .push((rows[i].rank_start(), rows[i].rank_end()));
+                let mut chunk = get_chunk(i)?;
+                if explain {
+                    chunk.scores = Some(scores_at(j, None));
+                }
+                results.push(chunk);
+                if results.len() == top_n {
+                    break;
+                }
+            }
             break;
         }
+        let mut best: Option<usize> = None;
+        let mut best_eff = 0.0f64;
+        let mut best_exact = false;
+        let mut best_bm = 0.0f64;
+        let mut best_decay = 1.0f64;
+        for j in 0..order.len() {
+            if taken[j] {
+                continue;
+            }
+            let i = order[j];
+            let path = rows[i].rank_path();
+            if let Some(spans) = by_path.get(path) {
+                if spans
+                    .iter()
+                    .any(|&(s, e)| s <= rows[i].rank_start() && rows[i].rank_end() <= e)
+                {
+                    continue;
+                }
+            }
+            let c = file_count.get(path).copied().unwrap_or(0);
+            let decay = SAT.powi(c as i32);
+            let eff = score_at(j) * decay;
+            let ex = exact.contains(&i);
+            let better = match best {
+                None => true,
+                Some(_) => {
+                    ex.cmp(&best_exact)
+                        .then_with(|| eff.total_cmp(&best_eff))
+                        .then_with(|| bm25_scores[j].total_cmp(&best_bm))
+                        == std::cmp::Ordering::Greater
+                }
+            };
+            if better {
+                best = Some(j);
+                best_eff = eff;
+                best_exact = ex;
+                best_bm = bm25_scores[j];
+                best_decay = decay;
+            }
+        }
+        let Some(j) = best else { break };
+        taken[j] = true;
+        let i = order[j];
+        let path = rows[i].rank_path();
+        *file_count.entry(path).or_insert(0) += 1;
+        by_path
+            .entry(path)
+            .or_default()
+            .push((rows[i].rank_start(), rows[i].rank_end()));
+        let mut chunk = get_chunk(i)?;
+        if explain {
+            chunk.scores = Some(scores_at(j, Some(best_decay)));
+        }
+        results.push(chunk);
     }
     Ok(results)
 }
@@ -1079,7 +1369,24 @@ impl Searcher {
         &self.passage_vectors
     }
 
+    /// Query with the semantic (`no sat`) ranking default.
     pub fn query(&self, query: &str, top_n: usize, explain: bool) -> Result<Vec<Chunk>> {
+        self.query_with_mode(query, top_n, explain, RankMode::Semantic, false)
+    }
+
+    /// Query with an explicit ranking mode. `saturate` only applies to
+    /// [`RankMode::Semantic`].
+    pub fn query_with_mode(
+        &self,
+        query: &str,
+        top_n: usize,
+        explain: bool,
+        mode: RankMode,
+        saturate: bool,
+    ) -> Result<Vec<Chunk>> {
+        if saturate && mode == RankMode::Classic {
+            return Err("saturation requires the semantic ranking mode".into());
+        }
         let mut terms = words(query);
         terms.sort();
         terms.dedup();
@@ -1116,6 +1423,10 @@ impl Searcher {
             false,
             explain,
             top_n,
+            query,
+            mode,
+            saturate,
+            chunks,
             |i| Ok(chunks[i].clone()),
         )
     }
@@ -1155,6 +1466,196 @@ pub fn cli_main() -> ExitCode {
             eprintln!("sgrep: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod rank_tests {
+    use super::*;
+
+    fn chunk(path: &str, content: &str) -> Chunk {
+        make_chunk(path, 1, 1, content.to_string())
+    }
+
+    fn chunk_at(path: &str, start: usize, end: usize, content: &str) -> Chunk {
+        make_chunk(path, start, end, content.to_string())
+    }
+
+    fn run(
+        mode: RankMode,
+        query: &str,
+        chunks: &[Chunk],
+        lexical: &[f64],
+        similarities: &[f64],
+        exact: HashSet<usize>,
+        saturate: bool,
+    ) -> Vec<Chunk> {
+        rank_impl(
+            chunks.len(),
+            lexical,
+            similarities,
+            Vec::new(),
+            &exact,
+            false,
+            true,
+            chunks.len(),
+            query,
+            mode,
+            saturate,
+            chunks,
+            |i| Ok(chunks[i].clone()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn classic_ranking_and_explain_shape_are_unchanged() {
+        let chunks = vec![
+            chunk("a.rs", "alpha"),
+            chunk("b.rs", "beta"),
+            chunk("c.rs", "gamma"),
+            chunk("d.rs", "delta"),
+        ];
+        // lexical [3, 2, 1, 0] and flat similarities make the expected score
+        // easy to write down. The zero-lexical row still enters through the
+        // semantic pool, exactly as the old ranker did.
+        let out = run(
+            RankMode::Classic,
+            "anything",
+            &chunks,
+            &[3.0, 2.0, 1.0, 0.0],
+            &[0.0; 4],
+            HashSet::from([2usize]),
+            false,
+        );
+        let paths: Vec<&str> = out.iter().map(|c| &*c.path).collect();
+        assert_eq!(paths, ["c.rs", "a.rs", "b.rs", "d.rs"]);
+        assert_eq!(out[0].scores.as_ref().unwrap().fused, 1.0 / 12.0);
+        assert_eq!(out[1].scores.as_ref().unwrap().fused, 0.25);
+        let json = serde_json::to_value(out[1].scores.as_ref().unwrap()).unwrap();
+        let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = [
+            "bm25",
+            "semantic",
+            "bm25_relative",
+            "semantic_relative",
+            "fused",
+            "exact_identifier",
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            keys, expected,
+            "classic explain output must keep its exact field set"
+        );
+    }
+
+    #[test]
+    fn semantic_symbol_boost_prefers_definitions_and_file_stems() {
+        let chunks = vec![
+            chunk("src/foo_bar.rs", "fn foo_bar() {}\n"),
+            chunk("src/other.rs", "fn foo_bar() {}\n"),
+            chunk("src/plain.rs", "let x = 1;\n"),
+        ];
+        let out = run(
+            RankMode::Semantic,
+            "foo_bar",
+            &chunks,
+            &[1.0, 1.0, 1.0],
+            &[0.5, 0.5, 0.5],
+            HashSet::new(),
+            false,
+        );
+        let paths: Vec<&str> = out.iter().map(|c| &*c.path).collect();
+        assert_eq!(paths, ["src/foo_bar.rs", "src/other.rs", "src/plain.rs"]);
+        assert_eq!(out[0].scores.as_ref().unwrap().symbol, Some(1.5));
+        assert_eq!(out[1].scores.as_ref().unwrap().symbol, Some(1.0));
+        assert_eq!(out[2].scores.as_ref().unwrap().symbol, Some(0.0));
+    }
+
+    #[test]
+    fn semantic_stem_boost_prefers_the_named_file() {
+        let chunks = vec![
+            chunk("src/parser/reader.rs", "alpha"),
+            chunk("src/unrelated.rs", "beta"),
+        ];
+        let out = run(
+            RankMode::Semantic,
+            "parser read",
+            &chunks,
+            &[1.0, 1.0],
+            &[0.5, 0.5],
+            HashSet::new(),
+            false,
+        );
+        assert_eq!(&*out[0].path, "src/parser/reader.rs");
+        assert!((out[0].scores.as_ref().unwrap().stem.unwrap() - 0.6).abs() < 1e-12);
+        assert_eq!(out[1].scores.as_ref().unwrap().stem, Some(0.0));
+    }
+
+    #[test]
+    fn saturation_is_opt_in_and_decays_repeats() {
+        let chunks = vec![
+            chunk_at("a.rs", 1, 2, "first"),
+            chunk_at("a.rs", 3, 4, "second"),
+            chunk_at("b.rs", 1, 1, "other"),
+            chunk_at("c.rs", 1, 1, "last"),
+        ];
+        // Semantic-relative scores put a.rs's second chunk above b.rs, but
+        // only by less than a factor of two, so saturation moves b.rs up.
+        let lexical = [1.0; 4];
+        let sims = [0.9, 0.7, 0.6, 0.0];
+        let plain = run(
+            RankMode::Semantic,
+            "plain",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            false,
+        );
+        let plain_paths: Vec<&str> = plain.iter().map(|c| &*c.path).collect();
+        assert_eq!(plain_paths, ["a.rs", "a.rs", "b.rs", "c.rs"]);
+        assert!(plain[0].scores.as_ref().unwrap().saturation.is_none());
+
+        let saturated = run(
+            RankMode::Semantic,
+            "plain",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            true,
+        );
+        let saturated_paths: Vec<&str> = saturated.iter().map(|c| &*c.path).collect();
+        assert_eq!(saturated_paths, ["a.rs", "b.rs", "a.rs", "c.rs"]);
+        assert_eq!(saturated[0].scores.as_ref().unwrap().saturation, Some(1.0));
+        assert_eq!(saturated[1].scores.as_ref().unwrap().saturation, Some(1.0));
+        assert_eq!(saturated[2].scores.as_ref().unwrap().saturation, Some(0.5));
+    }
+
+    #[test]
+    fn saturation_rejects_the_classic_mode() {
+        let chunks = vec![chunk("a.rs", "alpha")];
+        let err = match rank_impl(
+            chunks.len(),
+            &[1.0],
+            &[1.0],
+            Vec::new(),
+            &HashSet::new(),
+            false,
+            false,
+            1,
+            "alpha",
+            RankMode::Classic,
+            true,
+            &chunks,
+            |i| Ok(chunks[i].clone()),
+        ) {
+            Ok(_) => panic!("classic saturation must be rejected"),
+            Err(error) => error,
+        };
+        assert!(err.to_string().contains("saturation requires"));
     }
 }
 
@@ -1234,7 +1735,9 @@ mod resident_parity {
             let id = q["id"].as_str().unwrap();
             let query = q["query"].as_str().unwrap();
             let before_query = searcher.model().encoded_texts();
-            let resident = searcher.query(query, 10, true).unwrap();
+            let resident = searcher
+                .query_with_mode(query, 10, true, RankMode::Classic, false)
+                .unwrap();
             assert_eq!(
                 searcher.model().encoded_texts(),
                 before_query + 1,

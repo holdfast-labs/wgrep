@@ -238,6 +238,9 @@ impl Index {
             &similarities,
             Vec::new(),
             &exact,
+            // The cache path is classic-only (`search` skips it in semantic
+            // mode), so the ranker never reads row metadata here.
+            &[] as &[Chunk],
             |i| {
                 Ok(serde_json::from_slice(record(
                     self.data(),

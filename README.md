@@ -32,7 +32,7 @@
 ## Why wg
 
 - **220× faster edit-to-first-result**: 99 ms p50, against 21.8 s p50 for sgrep, which rebuilds its index.
-- **22× faster warm queries**: 25 ms p50, against 566 ms p50 for the sgrep CLI; identical top-10 rows and scores on 5/5 queries.
+- **22× faster warm queries**: 25 ms p50, against 566 ms p50 for the sgrep CLI; identical top-10 rows and scores on 5/5 queries in `--rank classic` mode.
 - **141 vs 5.5 q/s with 16 concurrent agents**: 25× the throughput, with zero errors.
 - **10.6× faster than rg on rare terms**: 6.0 ms vs 63.8 ms p50, with byte-identical output under `--sort path`.
 
@@ -119,6 +119,13 @@ on disk). The text route needs no model and no daemon. Full details are in
 
 Semantic results are ranked, not exhaustive. Use `-F` or `-e` when you need
 every match.
+
+The default semantic ranker adds three explainable signals to the fused BM25
+and embedding score: multi-chunk file coherence, a whole-query symbol
+definition boost (1.5x when the file stem matches), and a natural-language
+file-stem/parent-directory boost. `--rank classic` selects the pinned sgrep
+ranker for exact parity. `--saturate` is an opt-in per-file diversity flag
+that decays repeated chunks of one file in the first ten positions.
 
 ## For agents
 

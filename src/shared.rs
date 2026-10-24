@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use crate::{ModelChoice, Result, Searcher};
+use crate::{ModelChoice, RankMode, Result, Searcher};
 
 /// Wire protocol version. Metadata, ping, status, query and shutdown carry it,
 /// and the client refuses a daemon that speaks anything else.
@@ -457,7 +457,10 @@ fn admit(server: &Arc<Server>, queue: &mpsc::SyncSender<Job>, stream: TcpStream)
 /// `Searcher` is owned by the `Arc`; no lock is held here.
 fn serve_job(server: &Arc<Server>, job: Job) {
     let answer: Result<serde_json::Value> = (|| {
-        let results = server.searcher.query(&job.query, job.top_n, job.explain)?;
+        // This prototype keeps the original sgrep ranking.
+        let results = server
+            .searcher
+            .query_with_mode(&job.query, job.top_n, job.explain, RankMode::Classic, false)?;
         server.queries.fetch_add(1, Ordering::Relaxed);
         Ok(ok_with(
             serde_json::json!({ "results": serde_json::to_value(&results)? }),

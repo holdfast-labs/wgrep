@@ -9,8 +9,9 @@ See `bench/WGREP_WG_RELEASE.py`,
 
 The frozen release contract for the unified `wg` front door:
 
-- `wg QUERY [ROOT] --json --explain --model code` is the sgrep-compatible
-  hybrid semantic search. It must match a fresh pinned sgrep index exactly:
+- `wg QUERY [ROOT] --rank classic --json --explain --model code` is the
+  sgrep-compatible hybrid semantic search. The default ranker adds boosts and
+  is not part of this contract. It must match a fresh pinned sgrep index exactly:
   same ordered rows, same line ranges, same content, and the same finite
   numeric scores (no float tolerance).
 - Semantic result count is `--top N` / `-k N`. The pinned sgrep control keeps

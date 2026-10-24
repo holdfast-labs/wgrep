@@ -15,22 +15,28 @@ wg: semantic code search with ripgrep-compatible filesystem search.
 
 usage:
   wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text]
+           [--rank semantic|classic] [--saturate]
   wg [RIPGREP-FLAGS] PATTERN [PATH...]
   wg up [PATH] [--model auto|code|text] [--json]
   wg status [--json]
   wg down
 
-Semantic sgrep-compatible fused ranking is the default. A familiar ripgrep
-flag such as -F, -e, -n, -l, -g or --files selects the in-process ripgrep
-15.1.0 engine. wg then returns rg's stdout/stderr and exit status (0 match,
-1 no match, 2 error). The filesystem route is a real walk, not the semantic
-index. It does not need an rg binary on PATH.
+Semantic fused ranking is the default. The default ranker boosts file
+coherence, whole-query symbol definitions and natural-language file-stem
+matches. --rank classic selects the pinned sgrep ranker (exact parity).
+--saturate adds opt-in per-file diversity in the first ten positions.
+A familiar ripgrep flag such as -F, -e, -n, -l, -g or --files selects the
+in-process ripgrep 15.1.0 engine. wg then returns rg's stdout/stderr and exit
+status (0 match, 1 no match, 2 error). The filesystem route is a real walk,
+not the semantic index. It does not need an rg binary on PATH.
 
   --top N, -k N     semantic result count, 1..=100 (default 5)
   -n                ripgrep line numbers, not the semantic count
   --json            semantic JSON array by default; ripgrep JSON with rg flags
   --explain         add score detail to semantic JSON (requires --json)
   --model M         auto|code|text (semantic route)
+  --rank M          semantic (default) or classic (sgrep parity)
+  --saturate        decay repeated chunks of one file in the top 10
   --cache-dir DIR   model and parser asset cache (global prefix)
   -h, --help        this help
   -V, --version     version";
@@ -255,6 +261,8 @@ fn run_semantic(semantic: Semantic) -> Result<ExitCode> {
         semantic.top,
         semantic.explain,
         &semantic.model,
+        &semantic.rank,
+        semantic.saturate,
     )?;
     let results = r["results"].as_array().ok_or("invalid service response")?;
     if semantic.json {
