@@ -214,7 +214,7 @@ def render_end(width: int, height: int, out: Path) -> None:
 
     draw_centered(
         draw,
-        "Linux + Windows preview",
+        "Linux, Windows and macOS",
         note_font,
         int(height * note_y),
         MOCHA["green"],
