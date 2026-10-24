@@ -44,18 +44,16 @@ moved to `src/lib.rs`. Upstream `Cargo.toml` SHA-256 was
 
 - M1 frozen binary (built from upstream `src/main.rs`, not rebuilt here):
   `7baf3c66113d44dafdf993c79382e6c6f785c2a9968e630ba29109e35fbec842`,
-  at `/srv/projects/wispd/sgrep-native-baseline-0fbe8e5/wgrep-sgrep-core/target/release/sgrep`.
+  built on the Linux benchmark host.
 - Resident-core binary (this working tree, `cargo build --release --locked -j2`):
   `eaa0501c4fb9ed3b4b503faed4afe263d69ee6fe3fece46e750095eb9b8d5024`,
-  size `12459368`, at
-  `/srv/projects/wispd/sgrep-resident-core-v1/wgrep-sgrep-core/target/release/sgrep`.
+  size `12459368`, built on the Linux benchmark host.
 - Resident-core source-tree SHA-256 (sorted `sha256sum` of the seven
   `src/*.rs`, `Cargo.toml`, `Cargo.lock`, `LICENSE`, then SHA-256):
   `7f917afa872dfa105609febb9fa7e0413d1554756232069ce95fd4c34de2c926`.
 - Resident-vectors binary (this working tree, `cargo build --release --locked -j2`):
   `e988ea828702f69bd3132b8e7a5981cc28a804dfbec2a77f9bcb7ae50b545875`,
-  size `12476608`, at
-  `/srv/projects/wispd/sgrep-resident-vectors-v1/wgrep-sgrep-core/target/release/sgrep`.
+  size `12476608`, built on the Linux benchmark host.
 - Resident-vectors source-tree SHA-256:
   `65e6c7054fda67ca2264dca31032d460ca511ce7710b6face1ff86c3437e1cf9`.
 

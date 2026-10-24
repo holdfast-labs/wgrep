@@ -25,7 +25,7 @@
     "rg_version": "ripgrep 15.1.0 (rev af60c2de9d)",
     "model": "code",
     "machine": {
-      "hostname": "v2202610434069536057",
+      "hostname": "debian-vps",
       "platform": "linux",
       "cpu_count": 4,
       "mem_total_kb": 8138024

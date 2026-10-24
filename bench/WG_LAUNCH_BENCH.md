@@ -14,7 +14,7 @@ are retained on that VPS.
 
 | Item | Value |
 | --- | --- |
-| Machine | `v2202610434069536057`, Debian 13, x86_64, 4 vCPU, 7.8 GiB, no swap |
+| Machine | `debian-vps`, Debian 13, x86_64, 4 vCPU, 7.8 GiB, no swap |
 | Campaign date | `2026-10-22T15:47:59Z` |
 | Corpus | copy of `/srv/workspaces/wispd/prof/src` |
 | Corpus files | 13,448 files, 148.7 MB |
