@@ -18,8 +18,8 @@ MSVC build tools on Windows) to build from source. Linux x64, Windows x64,
 macOS arm64, or macOS x64. The macOS x64 archive is built by cross-compilation
 and smoke-tested under Rosetta 2. macOS has no benchmark numbers (all
 benchmarks are Linux), and the macOS cache is `~/.cache/wgrep`. The first
-semantic run downloads about 58 MB of model and parser assets. No `rg` binary
-is needed. Release archives ship only the `wg` binary.
+`wg up` downloads about 56 MB of model and parser assets (about 65 MB on disk).
+No `rg` binary is needed. Release archives ship only the `wg` binary.
 
 ## Docs
 

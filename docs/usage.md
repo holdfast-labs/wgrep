@@ -8,8 +8,8 @@ both search routes, the daemon, and the measured limits.
 - Rust 1.95 or newer to build. The crate uses edition 2024.
 - A C linker and standard build tools. On Linux, install `build-essential` or
   equivalent. On Windows, install the MSVC build tools.
-- Network access on the first semantic run. `wg` downloads about 58 MB of model
-  and parser assets. Later runs use the local cache.
+- Network access for the first `wg up`. `wg` downloads about 56 MB of model and
+  parser assets (about 65 MB on disk). Later runs use the local cache.
 - Linux x64, Windows x64, macOS arm64 (Apple Silicon), or macOS x64 (Intel).
 - No `rg` binary is necessary. `wg` contains ripgrep 15.1.
 
@@ -137,9 +137,9 @@ ripgrep engine.
 ## The semantic route
 
 The semantic route ranks code chunks. It uses a small local model. The pinned
-code model is `minishlab/potion-code-16M-v2`. The first run downloads the needed
-model and parser assets. Later runs use the cache. This route needs an attached
-root. Run `wg up` first.
+code model is `minishlab/potion-code-16M-v2`. The first `wg up` downloads the
+needed model and parser assets. Later runs use the cache. This route needs an
+attached root. Run `wg up` first.
 
 ```sh
 wg "where do we validate incoming requests" --top 10

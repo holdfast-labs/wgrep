@@ -59,8 +59,9 @@ cargo install --locked --path . --bin wg
 cargo install --locked --git https://github.com/holdfast-labs/wgrep wgrep --bin wg
 ```
 
-The first semantic run downloads about 58 MB of model and parser assets. Later
-runs use the cache. The text route does not need the model or `rg`.
+The first `wg up` downloads about 56 MB of model and parser assets (about 65 MB
+on disk). Later runs use the cache. The text route does not need the model or
+`rg`.
 
 On Windows, PowerShell may show the `wg up` progress line in red. It is progress
 output, not an error.

@@ -58,6 +58,11 @@
 | macOS arm64 | [wg-0.1.0-macos-arm64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.1.0-macos-arm64.tar.gz) |
 | macOS x64 | [wg-0.1.0-macos-x64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.1.0-macos-x64.tar.gz) |
 
+Verify an archive with its `.sha256` file before you unpack it:
+`sha256sum -c wg-0.1.0-linux-x64.tar.gz.sha256` (macOS: `shasum -a 256 -c ...`;
+Windows: compare `Get-FileHash` with the file). `SHA256SUMS` lists all
+platforms; use `sha256sum -c --ignore-missing SHA256SUMS`.
+
 ```sh
 tar -xzf wg-0.1.0-linux-x64.tar.gz    # or a macOS archive
 cd wg-0.1.0-*/
@@ -90,8 +95,8 @@ wg status                                      # roots, counts, health
 wg down                                        # stop the shared daemon
 ```
 
-The first semantic run downloads about 58 MB of model and parser assets. The
-text route needs no model and no daemon. Full details are in
+The first `wg up` downloads about 56 MB of model and parser assets (about 65 MB
+on disk). The text route needs no model and no daemon. Full details are in
 [docs/usage.md](docs/usage.md).
 
 ## Demos
