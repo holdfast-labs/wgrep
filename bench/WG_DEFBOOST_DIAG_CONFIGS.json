@@ -1,0 +1,12 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "rows", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_stem": true, "defn_kw": "narrow", "defn_spec": 0.05, "defn_rarity": true},
+  {"name": "rows2", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_stem": false, "defn_kw": "narrow", "defn_spec": 0.05, "defn_rarity": true},
+  {"name": "rows3", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_stem": true, "defn_kw": "narrow", "defn_rarity": true},
+  {"name": "rows4", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_stem": true, "defn_kw": "broad", "defn_spec": 0.05, "defn_rarity": true},
+  {"name": "def10", "lex": 200, "sem": 200, "w": 0.25, "def": 0.10}
+]

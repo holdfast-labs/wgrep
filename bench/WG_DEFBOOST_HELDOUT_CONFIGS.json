@@ -1,0 +1,18 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "def10", "lex": 200, "sem": 200, "w": 0.25, "def": 0.10},
+  {"name": "spec05", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.05, "defn_rarity": true, "defn_kw": "broad"},
+  {"name": "spec10", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.10, "defn_rarity": true, "defn_kw": "broad"},
+  {"name": "spec10_gate", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.10, "defn_rarity": true, "defn_kw": "broad",
+   "defn_gate": "length", "defn_min_words": 20},
+  {"name": "ident_gate", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.10, "defn_rarity": true, "defn_kw": "broad",
+   "defn_gate": "ident"},
+  {"name": "narrow10", "lex": 200, "sem": 200, "w": 0.25,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.05, "defn_rarity": true, "defn_kw": "narrow"},
+  {"name": "def10_spec10", "lex": 200, "sem": 200, "w": 0.25, "def": 0.10,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.10, "defn_rarity": true, "defn_kw": "broad"}
+]

@@ -1,0 +1,6 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "def10", "lex": 200, "sem": 200, "w": 0.25, "def": 0.10},
+  {"name": "def10_gate", "lex": 200, "sem": 200, "w": 0.25, "def": 0.10,
+   "defn_gate": "length", "defn_min_words": 20}
+]
