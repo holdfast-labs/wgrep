@@ -38,7 +38,7 @@ log = "=0.4.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "=1.0.151"
 termcolor = "=1.4.1"
-textwrap = { version = "=0.16.2", default-features = false }
+textwrap = { version = "=0.16.4", default-features = false }
 regex-syntax = "=0.8.8"
 memmap2 = "=0.9.9"
 notify = { version = "8", default-features = false }
