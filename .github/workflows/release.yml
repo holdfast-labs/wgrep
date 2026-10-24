@@ -116,7 +116,7 @@ jobs:
             --timeout 900
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wg-linux-x64
           path: ${{ runner.temp }}/out/*
@@ -214,7 +214,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "smoke failed with exit code $LASTEXITCODE" }
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wg-windows-x64
           path: ${{ runner.temp }}/out/*
@@ -335,7 +335,7 @@ jobs:
             --timeout 900
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wg-${{ matrix.platform }}
           path: ${{ runner.temp }}/out/*
