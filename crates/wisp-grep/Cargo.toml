@@ -40,7 +40,7 @@ serde_json = "=1.0.151"
 termcolor = "=1.4.1"
 textwrap = { version = "=0.16.2", default-features = false }
 regex-syntax = "=0.8.8"
-memmap2 = "=0.9.9"
+memmap2 = "=0.9.12"
 notify = { version = "8", default-features = false }
 # wgrep-sem only (optional, behind the `semantic` feature): pinned
 # static-embedding stack (lookup + pool + normalize, no transformer at
