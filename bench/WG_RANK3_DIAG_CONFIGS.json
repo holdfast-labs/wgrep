@@ -1,0 +1,13 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "r1", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.6, "coh": 0.05},
+  {"name": "sat_only", "lex": 200, "sem": 200, "w": 0.25, "sat": 0.5},
+  {"name": "coh_only", "lex": 200, "sem": 200, "w": 0.25, "coh": 0.05},
+  {"name": "stem_only", "lex": 200, "sem": 200, "w": 0.25, "stem": 0.6},
+  {"name": "sym_only", "lex": 200, "sem": 200, "w": 0.25, "sym": 1.0},
+  {"name": "no_sat", "lex": 200, "sem": 200, "w": 0.25, "sym": 1.0, "stem": 0.6, "coh": 0.05},
+  {"name": "no_coh", "lex": 200, "sem": 200, "w": 0.25, "sat": 0.5, "sym": 1.0, "stem": 0.6},
+  {"name": "no_stem", "lex": 200, "sem": 200, "w": 0.25, "sat": 0.5, "sym": 1.0, "coh": 0.05},
+  {"name": "no_sym", "lex": 200, "sem": 200, "w": 0.25, "sat": 0.5, "stem": 0.6, "coh": 0.05}
+]

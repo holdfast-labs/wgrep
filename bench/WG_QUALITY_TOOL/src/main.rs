@@ -504,6 +504,12 @@ struct Config {
     /// Per-file saturation: decay factor for the 2nd+ chunk from one file.
     #[serde(default)]
     sat: f64,
+    /// Number of chunks per file kept at full score before decay starts.
+    #[serde(default = "default_sat_from")]
+    sat_from: usize,
+    /// Optional gentler decay for the 2nd chunk of a file (0 = use `sat`).
+    #[serde(default)]
+    sat2: f64,
     /// Hard cap of chunks per file in the selected top-N (0 = off).
     #[serde(default)]
     cap: usize,
@@ -536,6 +542,10 @@ fn default_sym_stem() -> f64 {
 
 fn default_sel_top() -> usize {
     10
+}
+
+fn default_sat_from() -> usize {
+    1
 }
 
 fn default_pool() -> usize {
@@ -646,6 +656,8 @@ fn parse_args() -> Options {
             defn_spec: 0.0,
             defn_rarity: false,
             sat: 0.0,
+            sat_from: 1,
+            sat2: 0.0,
             cap: 0,
             sel_top: 10,
             coh: 0.0,
@@ -1136,7 +1148,18 @@ fn main() {
                         }
                         let eff = score(j)
                             * if in_window && cfg.sat > 0.0 {
-                                cfg.sat.powi(c as i32)
+                                if cfg.sat2 > 0.0 {
+                                    if c == 0 {
+                                        1.0
+                                    } else if c == 1 {
+                                        cfg.sat2
+                                    } else {
+                                        cfg.sat2 * cfg.sat.powi((c - 1) as i32)
+                                    }
+                                } else {
+                                    let exp = (c + 1).saturating_sub(cfg.sat_from);
+                                    cfg.sat.powi(exp as i32)
+                                }
                             } else {
                                 1.0
                             };
