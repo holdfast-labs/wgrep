@@ -24,7 +24,7 @@ jobs:
           - os: windows-latest
             python: python
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@stable
@@ -91,7 +91,7 @@ jobs:
     name: test (macos-14)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@stable
