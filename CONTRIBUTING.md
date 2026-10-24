@@ -28,8 +28,10 @@ cargo test --locked
 cd ../..
 
 cargo build --locked --release --bin wg
-python scripts/wg_release.py self-test --work <scratch-dir>
+python3 scripts/wg_release.py self-test --work <scratch-dir>
 ```
+
+On Windows, use `python` in place of `python3`.
 
 CI downloads a SHA-256-pinned `rg` 15.1.0 release for the parity tests. The
 text route must stay byte-compatible with `rg` 15.1.0. The parity harness

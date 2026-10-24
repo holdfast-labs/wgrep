@@ -11,8 +11,7 @@ directory, and add `bin/` to PATH. The archive contains `bin/wg` or `bin/wg.exe`
 
 From a checkout: `cargo install --locked --path . --bin wg`.
 
-`cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg`
-works once the repository is public.
+From the repository: `cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg`.
 
 Requirements: Rust 1.95+ and a C linker/build tools (`cc` on Linux and macOS,
 MSVC build tools on Windows) to build from source. Linux x64, Windows x64,

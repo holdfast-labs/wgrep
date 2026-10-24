@@ -15,26 +15,23 @@ The `wg` crate is at the repository root.
 - Binary commit: `2cee82c`
 - Binary SHA-256:
   `0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`
-- Render run: `/srv/projects/wispd/wg-media-2cee82c/run/20261022-224247`
-- Logs: `/srv/logs/wispd/wg-launch-media-20261022-224247/`
+- Render run and logs are kept on the build host.
 - Final assets are in `media/`, `charts/`, and `cards/`.
-- The charts are regenerated from the Phase E results JSON. The rg-flags
+- The charts are regenerated from the results JSON. The rg-flags
   clip, the 16:9 hero, the multi-repo clip, and the README multi-repo GIF and
   MP4 are rendered from commit `2cee82c`. The multi-repo status shows
   `text: ready [current], 13333 files (13290 indexed, 43 unindexed)`.
-- `E:\wg-launch-media\review\` has the eight chart PNGs and full-size final
-  frames for the four 16:9 clips and the 16:9 hero. The Phase E charts are in
-  `E:\wg-launch-media\review\phaseE-charts\`. The clip review frames are in
-  `E:\wg-launch-media\review\phaseE-clips3\`.
+- The render review directory has the eight chart PNGs and full-size final
+  frames for the four 16:9 clips and the 16:9 hero. It also has the chart review
+  files and the clip review frames.
 
 ## Corpus
 
 The clips search a copy of the Rust source tree:
 
-- Windows source: `E:\wgrep-code\rust\src`
-- VPS source: `/srv/workspaces/wispd/prof/src`
+- Source: a copy of the Rust `src` tree.
 - Windows copy: 13,439 files, 73.4 MB.
-- VPS campaign corpus: 13,448 files, 148.7 MB.
+- Linux campaign corpus: 13,448 files, 148.7 MB.
 
 The render script copies the corpus to a scratch directory and builds an
 isolated index for each clip. The visible semantic searches are warm. The
@@ -43,8 +40,8 @@ hidden setup until `wg status --json` reports `"building":false`.
 
 ## Hook question
 
-We used benchmark question M6 q1. On a copy of the render corpus
-(`/srv/workspaces/wispd/prof/src`), `wg` top-1 was:
+We used one launch benchmark question. On a copy of the render corpus, `wg`
+top-1 was:
 
 ```text
 tools/rust-analyzer/crates/parser/src/grammar/expressions.rs:411-412
@@ -67,12 +64,13 @@ rg -il "unary" . | wc -l
 # 184 files on the render corpus copy
 ```
 
-The count was measured on a copy of `/srv/workspaces/wispd/prof/src`.
-The clip runs the same command on the render corpus. The render script also
-writes the render-corpus count to `<run>/rg-keyword-count-16x9.txt`.
+The count was measured on the render corpus copy. The clip runs the same
+command on that copy. The render script also writes the render-corpus count to
+`<run>/rg-keyword-count-16x9.txt`.
 
-We chose q1 because it had a correct top-1 path and the cited line was inside
-the returned chunk. The earlier rustdoc question remains the fallback:
+We chose that question because it had a correct top-1 path and the cited
+line was inside the returned chunk. The earlier rustdoc question remains the
+fallback:
 `find the rustdoc function that parses command line options` returned
 `librustdoc/config.rs:381-384`. The broad version
 `where does rustdoc parse command line options` returned a documentation page,
@@ -121,31 +119,26 @@ Burned-in captions:
 
 ## Build
 
-Build the launch binary from a source export on the VPS:
+Build the launch binary from a source export:
 
 ```sh
-git -C /c/git/wispd archive 2cee82c \
-  | ssh vps 'mkdir -p /srv/projects/wispd/wg-media-2cee82c/src && \
-             tar -C /srv/projects/wispd/wg-media-2cee82c/src -xf -'
-ssh vps
-source ~/.cargo/env
-cd /srv/projects/wispd/wg-media-2cee82c/src
-CARGO_TARGET_DIR=/srv/projects/wispd/wg-media-2cee82c/target \
-  cargo build --locked --release --bin wg -j2
+git archive 2cee82c | tar -C "$SRC" -xf -
+cd "$SRC"
+CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --bin wg -j2
 ```
 
 The recorded run used `2cee82c`. Binary SHA-256:
 `0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`.
-The binary was copied to `/srv/projects/wispd/wg-media-2cee82c/bin/wg`, and the
-build target was removed after the render.
+The binary was copied to a stable path, and the build target was removed after
+the render.
 
 ## Re-render
 
 ```sh
-export WG_BIN=/srv/projects/wispd/wg-media-2cee82c/bin/wg
-export WG_RG=/srv/workspaces/wispd/tools/rg-15/rg
-export WG_LAUNCH_CORPUS_SRC=/srv/workspaces/wispd/prof/src
-export WG_LAUNCH_ROOT=/srv/projects/wispd/wg-media-2cee82c/run
+export WG_BIN=/path/to/wg
+export WG_RG=/path/to/rg
+export WG_LAUNCH_CORPUS_SRC=/path/to/rust/src
+export WG_LAUNCH_ROOT=/path/to/run
 python3 docs/launch/make_cards.py
 python3 docs/launch/make_charts.py
 bash scripts/render_launch_media.sh
@@ -167,8 +160,8 @@ The script:
 
 Default locations:
 
-- Run directory: `/srv/projects/wispd/wg-media-2cee82c/run/<stamp>/`
-- Logs: `/srv/logs/wispd/wg-launch-media-<stamp>/`
+- Run directory: `$WG_LAUNCH_ROOT/<stamp>/`
+- Logs: `$WG_LAUNCH_LOG_ROOT/wg-launch-media-<stamp>/`
 - Probe JSON: `<run>/probe/`
 - Contact sheets: `<run>/sheets/`
 - Manifest: `<run>/manifest.txt`
@@ -188,7 +181,7 @@ The tapes are in `demos/`:
 
 They use the big Rust corpus for the hook, live edit, and rg-flag clips.
 The two-repository clip attaches a small generated second repository to the
-same daemon. It uses `/home/agent/code/rust` and `/home/agent/code/api-server`
+same daemon. It uses `$HOME/code/rust` and `$HOME/code/api-server`
 so `wg status` paths stay short and fit without `fold`. The multi-repo
 status shows `text: ready [current]` for both roots.
 
@@ -284,11 +277,11 @@ square charts.
   optional semantic query was tested and dropped because the new function was
   not top-1.
 - The hook answer was checked on a copy of the render corpus. The `wg` top-1
-  result for M6 q1 was
+  result for that question was
   `tools/rust-analyzer/crates/parser/src/grammar/expressions.rs:411-412`.
   Recheck if the corpus or model changes.
-- Windows VHS did not produce output on this machine. All videos render on the
-  Debian VPS.
+- Windows VHS did not produce output on this machine. All videos render on
+  Linux.
 - Square video was dropped because the 68-character result path was not
   readable at 1080 square. Square charts and square title/end cards remain
   PNG images.

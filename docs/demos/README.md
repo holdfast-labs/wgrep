@@ -34,8 +34,7 @@ The quickstart and live GIFs and MP4s use the release binary built from
 - Binary SHA-256:
   `88df12947478fc32539d8bfc9a537aee6642ae60a27c6e63408cd444ab8a5aa0`
 - Build: `cargo build --locked --release --bin wg -j2`
-- The VPS build target was removed after copying the binary to
-  `/srv/projects/wispd/wg-media-v0.1.0/bin/wg`.
+- The build target was removed after the binary was copied to a stable path.
 
 The multi-repo GIF and MP4 use the release binary built from `git archive
 2cee82c`:
@@ -44,11 +43,10 @@ The multi-repo GIF and MP4 use the release binary built from `git archive
 - Binary SHA-256:
   `0b95823c1d65c89f864f3f271c5ccdfffa11e2833715782846a0667f1d2ffc7e`
 - Build: `cargo build --locked --release --bin wg -j2`
-- The VPS build target was removed after copying the binary to
-  `/srv/projects/wispd/wg-media-2cee82c/bin/wg`.
+- The build target was removed after the binary was copied to a stable path.
 
-The visible roots are under `$HOME/code`, so no `/srv/`, `wispd`, or run-id
-string appears in a recording:
+The visible roots are under `$HOME/code`, so no build path or run-id string
+appears in a recording:
 
 - `$HOME/code/rust`: copy of the Rust `src` corpus.
 - `$HOME/code/live`: copy with an empty `live.rs`.
@@ -64,10 +62,10 @@ its own short `Preparing wg index` step. The multi-repo status shows
 The checked-in assets are rendered with:
 
 ```sh
-export PATH=/srv/projects/wispd/wg-launch-media-20261020/tools/bin:$PATH
+export PATH=/path/to/vhs/tools/bin:$PATH
 export WG_DEMO_ROOT=/tmp/wg-demo-v010
-export WG_BIN=/srv/projects/wispd/wg-media-v0.1.0/bin/wg
-export WG_DEMO_CORPUS_SRC=/srv/workspaces/wispd/prof/src
+export WG_BIN=/path/to/wg
+export WG_DEMO_CORPUS_SRC=/path/to/rust/src
 export WG_DEMO_HOME=$HOME/code
 bash scripts/render_wg_demos.sh
 ```
@@ -80,7 +78,7 @@ known to work. The script:
 2. renders the tapes at 1200 px wide with the Catppuccin frame; the quickstart
    and live tapes use tight canvases (1200x314 and 1200x178) and no window bar;
 3. converts each MP4 to a looping GIF at 12 fps with a 128-color palette;
-4. audits GIF frames with OCR and fails on `/srv/`, `wispd`, or a run id;
+4. audits GIF frames with OCR and fails on a build path or a run id;
 5. writes the GIFs and MP4s to `docs/media`;
 6. writes final frames and contact sheets to `<run>/review`;
 7. stops every daemon and removes `$HOME/code`.
@@ -100,7 +98,6 @@ The tapes are in this directory:
 the second repository when `WG_DEMO_SECOND` is set, and empties `live.rs` when
 `WG_DEMO_EMPTY_LIVE=1`.
 
-The final frames and contact sheets are in
-`E:\wg-launch-media\review\gifs\`. The README key frames (quickstart first,
-middle, and last; live last) are in `E:\wg-launch-media\review\readme-gifs\`.
-Never substitute echoed results or hard-coded build times.
+The final frames and contact sheets are in `<run>/review`. The README key
+frames (quickstart first, middle, and last; live last) are selected from those
+files. Never substitute echoed results or hard-coded build times.

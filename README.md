@@ -72,8 +72,7 @@ $env:PATH = "$dir\bin;$env:PATH"; wg --version
 
 From a clone: `cargo install --locked --path . --bin wg`.
 
-The `--git` form below works once the repository is public. Until then, use the
-archive or the `--path` form from a clone.
+Or install directly from the repository:
 
 ```sh
 cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg

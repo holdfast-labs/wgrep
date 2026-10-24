@@ -1,7 +1,7 @@
 # wg benchmarks
 
-All numbers here come from retained raw records on the authorized Debian 13
-VPS (4 vCPU, 7.8 GiB RAM, no swap). They are single measurement runs, not
+All numbers here come from retained raw records on a Debian 13 VPS (4 vCPU,
+7.8 GiB RAM, no swap). They are single measurement runs, not
 percentiles over many sessions or machines. Windows numbers are a separate
 corpus copy and are not an apples-to-apples ratio.
 
@@ -140,9 +140,8 @@ sgrep revision `0fbe8e5725f71667789be4a3abcea4e02f33afa4` and ripgrep 15.1.0.
 The launch campaign is documented in
 [bench/WG_LAUNCH_BENCH.md](../bench/WG_LAUNCH_BENCH.md).
 
-Raw receipts (commands, stdout/stderr, argv, per-sample timings) are retained
-under `E:\wgrep-worktrees\wg-release-20261018\validation` and on the VPS under
-`/srv/logs/wispd/`.
+Raw receipts (commands, stdout/stderr, argv, per-sample timings) are kept
+outside this repository.
 
 ## Media
 

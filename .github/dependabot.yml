@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # vendor/notify is a patched 8.2 copy. Update the patch first.
+      - dependency-name: "notify"
+
+  # crates/wisp-grep is a separate workspace with its own Cargo.lock.
+  - package-ecosystem: "cargo"
+    directory: "/crates/wisp-grep"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+# vendor/ and third_party/ are not listed here, so Dependabot does not scan
+# them. They contain vendored sources and stay on their pinned revisions.

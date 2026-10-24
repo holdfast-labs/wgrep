@@ -16,7 +16,7 @@ CI and release build with Rust `1.95`. This is the `rust-version` in
 - `cargo test --locked --test wg_lexical_parity --test wg_source_files_parity`
 - `cargo test --locked` in `crates/wisp-grep`
 - `cargo build --locked --release --bin wg`
-- `python scripts/wg_release.py self-test --work <scratch-dir>`
+- `python3 scripts/wg_release.py self-test --work <scratch-dir>` (`python` on Windows)
 
 Jobs run on `ubuntu-latest`, `windows-latest`, and `macos-14`. Cargo caches
 are restored by `Swatinem/rust-cache`. The `macos-14` job runs the library,

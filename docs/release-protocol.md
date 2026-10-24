@@ -1,7 +1,7 @@
 # wg release validation protocol
 
-Status: harness authored and self-checked, 2026-10-18. No run against a real
-service yet. See `bench/WGREP_WG_RELEASE.py`,
+Status: run it for each release.
+See `bench/WGREP_WG_RELEASE.py`,
 `bench/WGREP_WG_RELEASE_QUERIES.json` and
 `bench/WGREP_WG_RELEASE_RUN.sh`.
 
@@ -23,15 +23,14 @@ The frozen release contract for the unified `wg` front door:
   `WG_SERVICE_DIR` isolates service state.
 
 The harness does not edit or embed the Rust CLI. It compares an existing
-candidate binary with the pinned controls, so it starts after the search
-contributor reports a compiled `wg`.
+candidate binary with the pinned controls, so it starts from a compiled `wg`.
 
 ## Pinned controls
 
-- sgrep: `/srv/projects/wispd/sgrep-control-0fbe8e5/target/release/sgrep`,
-  revision `0fbe8e5725f71667789be4a3abcea4e02f33afa4`, SHA-256
+- sgrep: pinned control binary, revision
+  `0fbe8e5725f71667789be4a3abcea4e02f33afa4`, SHA-256
   `715946fa0f17006905b5f0d0bbf1f21c00e355882855ec40c44c14e78a3c6217`.
-- rg: `/srv/workspaces/wispd/tools/rg-15/rg`, version 15.1.0.
+- rg: `rg` 15.1.0 binary.
 - model: `minishlab/potion-code-16M-v2`, revision
   `e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b`, `--model code`.
 
@@ -134,13 +133,12 @@ mixture over the listed queries, not a per-query percentile from 120 samples.
   regex scans. A text-matrix mismatch is a real finding, not an approximation.
 - The semantic comparison proves candidate/control equality on settled small
   fixtures. It is not a large-corpus quality claim.
-- The setup numbers in `WGREP_RELEASE_WORKPLAN.md` are setup measurements, not
-  search latency. Warm and visibility numbers come only from the saved raw
-  records of a real run.
+- Setup measurements are not search latency. Warm and visibility numbers come
+  only from the saved raw records of a real run.
 
 ## How to run
 
-Self-check (no service binary needed; this is the only thing executed now):
+Self-check (no service binary needed):
 
 ```sh
 python bench/WGREP_WG_RELEASE.py --self-test
@@ -148,11 +146,11 @@ python bench/WGREP_WG_RELEASE.py --verify-queries
 python -m py_compile bench/WGREP_WG_RELEASE.py
 ```
 
-Full run on the VPS, after the source contributor lands a compiled `wg`:
+Full run against a compiled `wg`:
 
 ```sh
-candidate=/srv/projects/wispd/sgrep-shared-daemon-v1/wgrep-sgrep-core/target/release/wg
-work=/srv/logs/wispd/wg-release-$(date +%Y%m%d-%H%M%S)
+candidate=/path/to/wg
+work=$(mktemp -d)
 python3 bench/WGREP_WG_RELEASE.py --run \
   --wg "$candidate" --wg-sha256 "$(sha256sum "$candidate" | cut -d' ' -f1)" \
   --wg-source-revision "<git-rev-or-tree-hash>" \
@@ -164,15 +162,13 @@ Optional six-language parity and a read-only large-corpus timing arm:
 ```sh
 python3 bench/WGREP_WG_RELEASE.py --run ... \
   --sixlang-fixture bench/WGREP_SGREP_PARITY_FIXTURE \
-  --bench-root /srv/workspaces/wispd/prof/src
+  --bench-root /path/to/rust/src
 ```
 
-Local scratch for a Windows-side dry run is
-`E:/wgrep-worktrees/wg-release-20261018`; it is not used for Linux builds.
-No generated output belongs on `C:` except the source files.
+Keep generated output outside the repository.
 
-## Not executed now
+## Run status
 
-Only `--self-test`, `--verify-queries` and `py_compile` ran. No `wg` binary
-exists for the frozen contract yet, so no phase, no remote build and no timing
-ran. The harness must not run against a stale CLI.
+Run the self-check before each release. Run the full protocol against the
+candidate binary for that release. The harness must not run against a stale
+CLI.
