@@ -1,0 +1,17 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "coh005", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.5, "coh": 0.05},
+  {"name": "stem06_coh005", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.6, "coh": 0.05},
+  {"name": "stem06_coh008", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.6, "coh": 0.08},
+  {"name": "coh008", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.5, "coh": 0.08},
+  {"name": "cap2_coh005", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "cap": 2, "sym": 1.0, "stem": 0.5, "coh": 0.05},
+  {"name": "sat06_coh005", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.6, "sym": 1.0, "stem": 0.5, "coh": 0.05},
+  {"name": "stem07_coh005", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.7, "coh": 0.05}
+]

@@ -1,0 +1,147 @@
+{
+  "seed": 20261024,
+  "rule": "per language: sorted names, seeded shuffle, alternate which half gets the extra repo",
+  "dev": {
+    "bash": [
+      "bash-it",
+      "bats-core"
+    ],
+    "c": [
+      "curl"
+    ],
+    "cpp": [
+      "fmtlib",
+      "nlohmann-json"
+    ],
+    "csharp": [
+      "messagepack-csharp"
+    ],
+    "elixir": [
+      "ecto",
+      "phoenix"
+    ],
+    "go": [
+      "chi"
+    ],
+    "haskell": [
+      "aeson",
+      "pandoc"
+    ],
+    "java": [
+      "jackson-databind"
+    ],
+    "javascript": [
+      "axios",
+      "express"
+    ],
+    "kotlin": [
+      "exposed"
+    ],
+    "lua": [
+      "mini.nvim",
+      "telescope.nvim"
+    ],
+    "php": [
+      "monolog"
+    ],
+    "python": [
+      "click",
+      "flask",
+      "model2vec",
+      "requests",
+      "starlette"
+    ],
+    "ruby": [
+      "sinatra"
+    ],
+    "rust": [
+      "axum",
+      "tokio"
+    ],
+    "scala": [
+      "circe"
+    ],
+    "swift": [
+      "alamofire",
+      "snapkit"
+    ],
+    "typescript": [
+      "vitest"
+    ],
+    "zig": [
+      "zig",
+      "zig-clap"
+    ]
+  },
+  "heldout": {
+    "bash": [
+      "nvm"
+    ],
+    "c": [
+      "libuv",
+      "redis"
+    ],
+    "cpp": [
+      "abseil-cpp"
+    ],
+    "csharp": [
+      "dapper",
+      "newtonsoft-json"
+    ],
+    "elixir": [
+      "plug"
+    ],
+    "go": [
+      "cobra",
+      "gin"
+    ],
+    "haskell": [
+      "xmonad"
+    ],
+    "java": [
+      "commons-lang",
+      "gson"
+    ],
+    "javascript": [
+      "redux"
+    ],
+    "kotlin": [
+      "kotlinx-coroutines",
+      "ktor"
+    ],
+    "lua": [
+      "lazy.nvim"
+    ],
+    "php": [
+      "guzzle",
+      "laravel-framework"
+    ],
+    "python": [
+      "aiohttp",
+      "fastapi",
+      "httpx",
+      "pydantic"
+    ],
+    "ruby": [
+      "rack",
+      "rails"
+    ],
+    "rust": [
+      "serde"
+    ],
+    "scala": [
+      "cats",
+      "http4s"
+    ],
+    "swift": [
+      "vapor"
+    ],
+    "typescript": [
+      "trpc",
+      "zod"
+    ],
+    "zig": [
+      "zls"
+    ]
+  }
+}

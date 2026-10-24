@@ -1,0 +1,19 @@
+[
+  {"name": "base", "lex": 200, "sem": 200, "w": 0.25},
+  {"name": "c1_best", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.5, "coh": 0.2},
+  {"name": "c2_stem06", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.6, "coh": 0.2},
+  {"name": "c3_coh015", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.5, "coh": 0.15},
+  {"name": "c4_cap2", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "cap": 2, "sym": 1.0, "stem": 0.5, "coh": 0.2},
+  {"name": "c5_plus_narrow", "lex": 200, "sem": 200, "w": 0.25,
+   "sat": 0.5, "sym": 1.0, "stem": 0.5, "coh": 0.2,
+   "defn": 0.10, "defn_idf": true, "defn_spec": 0.05, "defn_rarity": true, "defn_kw": "narrow"},
+  {"name": "c6_nosat", "lex": 200, "sem": 200, "w": 0.25,
+   "sym": 1.0, "stem": 0.5, "coh": 0.2},
+  {"name": "c7_sat_only", "lex": 200, "sem": 200, "w": 0.25, "sat": 0.5},
+  {"name": "c8_sym_stem", "lex": 200, "sem": 200, "w": 0.25,
+   "sym": 1.0, "stem": 0.5}
+]

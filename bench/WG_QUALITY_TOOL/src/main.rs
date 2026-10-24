@@ -150,6 +150,8 @@ fn keywords_for(path: &str) -> Option<&'static Vec<Regex>> {
 struct DefIndex {
     /// chunk index -> name token ids for each distinct defined name.
     names: Vec<Vec<Vec<u32>>>,
+    /// chunk index -> normalised full name, parallel to `names`.
+    full: Vec<Vec<String>>,
     token_ids: HashMap<String, u32>,
     token_df: Vec<u32>,
     token_idf: Vec<f64>,
@@ -209,9 +211,11 @@ impl DefIndex {
             .map(|d| idf(*d, corpus_len))
             .collect();
         let mut names = Vec::with_capacity(corpus_len);
+        let mut full = Vec::with_capacity(corpus_len);
         let mut bytes = 0usize;
         for per_chunk in raw {
             let mut out = Vec::with_capacity(per_chunk.len());
+            let mut full_out = Vec::with_capacity(per_chunk.len());
             for (normalised, toks) in per_chunk {
                 let ids: Vec<u32> = toks
                     .iter()
@@ -219,8 +223,10 @@ impl DefIndex {
                     .collect();
                 bytes += ids.len() * 4 + 24 + normalised.len();
                 out.push(ids);
+                full_out.push(normalised);
             }
             names.push(out);
+            full.push(full_out);
         }
         bytes += token_ids
             .keys()
@@ -229,6 +235,7 @@ impl DefIndex {
         bytes += name_set.iter().map(|s| s.len() + 32).sum::<usize>();
         DefIndex {
             names,
+            full,
             token_ids,
             token_df,
             token_idf,
@@ -347,6 +354,107 @@ fn query_ident_like(query: &str, def_index: &DefIndex) -> bool {
         .any(|w| def_index.name_set.contains(&w))
 }
 
+// Semble's whole-query symbol test. A symbol query is one token, or a
+// namespace-qualified path, a leading underscore, or a token with an
+// uppercase letter or an underscore.
+static SYMBOL_QUERY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\\|->|\.)[A-Za-z_][A-Za-z0-9_]*)+|_[A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9]*[A-Z_][A-Za-z0-9_]*|[A-Z][A-Za-z0-9]*)$",
+    )
+    .unwrap()
+});
+
+fn is_symbol_query(query: &str) -> bool {
+    SYMBOL_QUERY.is_match(query.trim())
+}
+
+fn symbol_name(query: &str) -> String {
+    let q = query.trim();
+    for sep in ["::", "\\", "->", "."] {
+        if let Some((_, tail)) = q.rsplit_once(sep) {
+            return tail.to_string();
+        }
+    }
+    q.to_string()
+}
+
+fn normalise_name(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
+/// Semble's file-stem match: exact, snake-normalised, or plural-tolerant.
+fn file_stem_matches(path: &str, symbol: &str) -> bool {
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let stem_norm = stem.replace('_', "");
+    let name = symbol.to_lowercase();
+    let name_norm = name.replace('_', "");
+    let trim_s = |s: &str| s.strip_suffix('s').unwrap_or(s).to_string();
+    stem == name
+        || stem_norm == name_norm
+        || trim_s(&stem) == name
+        || trim_s(&stem_norm) == name_norm
+}
+
+/// Semble's `_count_keyword_matches`: exact, or a 3-character prefix overlap.
+fn keyword_matches(keywords: &HashSet<String>, parts: &HashSet<String>) -> usize {
+    let mut n = 0usize;
+    for keyword in keywords {
+        if parts.contains(keyword) {
+            n += 1;
+            continue;
+        }
+        for part in parts {
+            let (shorter, longer) = if keyword.len() <= part.len() {
+                (keyword, part)
+            } else {
+                (part, keyword)
+            };
+            if shorter.chars().count() >= 3 && longer.starts_with(shorter) {
+                n += 1;
+                break;
+            }
+        }
+    }
+    n
+}
+
+/// Semble's NL file-stem/path boost for one path, in [0, 1].
+fn stem_path_score(path: &str, keywords: &HashSet<String>, cache: &mut HashMap<String, f64>) -> f64 {
+    if keywords.is_empty() {
+        return 0.0;
+    }
+    if let Some(v) = cache.get(path) {
+        return *v;
+    }
+    let p = Path::new(path);
+    let mut parts: HashSet<String> = words(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+        .into_iter()
+        .filter(|w| w.chars().count() >= 3)
+        .collect();
+    if let Some(parent) = p.parent().and_then(|q| q.file_name()).and_then(|s| s.to_str()) {
+        if parent != "." && parent != "/" {
+            parts.extend(
+                words(parent)
+                    .into_iter()
+                    .filter(|w| w.chars().count() >= 3),
+            );
+        }
+    }
+    let n = keyword_matches(keywords, &parts);
+    let score = if n > 0 {
+        let ratio = n as f64 / keywords.len() as f64;
+        if ratio >= 0.10 { ratio } else { 0.0 }
+    } else {
+        0.0
+    };
+    cache.insert(path.to_string(), score);
+    score
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 struct Config {
     name: String,
@@ -393,6 +501,41 @@ struct Config {
     /// Multiply by normalised IDF of the rarest matched name token.
     #[serde(default)]
     defn_rarity: bool,
+    /// Per-file saturation: decay factor for the 2nd+ chunk from one file.
+    #[serde(default)]
+    sat: f64,
+    /// Hard cap of chunks per file in the selected top-N (0 = off).
+    #[serde(default)]
+    cap: usize,
+    /// Position window for saturation and cap (default 10).
+    #[serde(default = "default_sel_top")]
+    sel_top: usize,
+    /// Multi-chunk file coherence boost, as a fraction of the max score.
+    #[serde(default)]
+    coh: f64,
+    /// Natural-language file-stem/path boost, as a fraction of the max score.
+    #[serde(default)]
+    stem: f64,
+    /// Whole-query symbol: definition boost, as a fraction of the max score.
+    #[serde(default)]
+    sym: f64,
+    /// Whole-query symbol: BM25 weight override.
+    #[serde(default)]
+    sym_w: Option<f64>,
+    /// Whole-query symbol: multiplier when the file stem matches the symbol.
+    #[serde(default = "default_sym_stem")]
+    sym_stem: f64,
+    /// Whole-query symbol: additive exact-match boost instead of a hard tier.
+    #[serde(default)]
+    sym_soft: f64,
+}
+
+fn default_sym_stem() -> f64 {
+    1.5
+}
+
+fn default_sel_top() -> usize {
+    10
 }
 
 fn default_pool() -> usize {
@@ -431,6 +574,7 @@ struct Options {
     top: usize,
     content: bool,
     profile: bool,
+    rows: bool,
 }
 
 fn parse_args() -> Options {
@@ -442,6 +586,7 @@ fn parse_args() -> Options {
     let mut top = 100usize;
     let mut content = false;
     let mut profile = false;
+    let mut rows = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -473,6 +618,10 @@ fn parse_args() -> Options {
                 profile = true;
                 i += 1;
             }
+            "--rows" => {
+                rows = true;
+                i += 1;
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -496,6 +645,15 @@ fn parse_args() -> Options {
             defn_mode: None,
             defn_spec: 0.0,
             defn_rarity: false,
+            sat: 0.0,
+            cap: 0,
+            sel_top: 10,
+            coh: 0.0,
+            stem: 0.0,
+            sym: 0.0,
+            sym_w: None,
+            sym_stem: 1.5,
+            sym_soft: 0.0,
         });
     }
     Options {
@@ -506,6 +664,7 @@ fn parse_args() -> Options {
         top,
         content,
         profile,
+        rows,
     }
 }
 
@@ -536,6 +695,9 @@ fn main() {
             if uses_defn(c) {
                 needed.insert((c.defn_kw.as_deref() != Some("broad"), c.defn_stem));
             }
+            if c.sym > 0.0 {
+                needed.insert((true, false));
+            }
         }
         let t_index = Instant::now();
         for (narrow, stem) in needed {
@@ -559,6 +721,7 @@ fn main() {
 
     let mut defn_ns: u128 = 0;
     let mut legacy_def_ns: u128 = 0;
+    let mut sel_ns: u128 = 0;
     let mut pen_ns: u128 = 0;
     let mut rrf_ns: u128 = 0;
     let mut timed_queries: u64 = 0;
@@ -627,6 +790,18 @@ fn main() {
                     .iter()
                     .position(|chunk| contains_line(chunk, &t.path, t.line))
             })
+            .collect();
+
+        let sym_query = is_symbol_query(&q.query);
+        let sym_name = if sym_query {
+            symbol_name(&q.query)
+        } else {
+            String::new()
+        };
+        let sym_norm = normalise_name(&sym_name);
+        let stem_keywords: HashSet<String> = words(&q.query)
+            .into_iter()
+            .filter(|w| w.chars().count() >= 3)
             .collect();
 
         let mut config_results = Vec::new();
@@ -767,26 +942,234 @@ fn main() {
             };
             rrf_ns += t_rrf.elapsed().as_nanos();
 
+            let t_sel = Instant::now();
+            let w_eff = if sym_query {
+                cfg.sym_w.unwrap_or(cfg.w)
+            } else {
+                cfg.w
+            };
+            let base_scores: Vec<f64> = (0..order.len())
+                .map(|i| {
+                    if cfg.rrf {
+                        let l = rrf_lex[i] / rrf_norm;
+                        let s = rrf_sem[i] / rrf_norm;
+                        w_eff * l + (1.0 - w_eff) * s
+                    } else {
+                        w_eff * bm_rel[i] + (1.0 - w_eff) * sem_rel[i]
+                    }
+                })
+                .collect();
+            let max_base = base_scores
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .max(0.0);
+
+            // Multi-chunk file coherence: add a share of the file's total score
+            // to its best chunk.
+            let mut coh_scores = vec![0.0; order.len()];
+            if cfg.coh > 0.0 {
+                let mut file_sum: HashMap<&str, f64> = HashMap::new();
+                let mut best_chunk: HashMap<&str, usize> = HashMap::new();
+                for (j, &i) in order.iter().enumerate() {
+                    let path = &*chunks[i].path;
+                    *file_sum.entry(path).or_insert(0.0) += base_scores[j].max(0.0);
+                    let slot = best_chunk.entry(path).or_insert(j);
+                    if base_scores[j] > base_scores[*slot] {
+                        *slot = j;
+                    }
+                }
+                let max_sum = file_sum
+                    .values()
+                    .copied()
+                    .fold(0.0f64, f64::max)
+                    .max(f64::EPSILON);
+                for (path, &j) in &best_chunk {
+                    coh_scores[j] = cfg.coh * max_base * file_sum[path] / max_sum;
+                }
+            }
+
+            // Whole-query symbol: boost chunks that define the symbol, and
+            // more when the file stem matches it.
+            let sym_scores: Vec<f64> = if cfg.sym > 0.0 && sym_query {
+                let idx = def_indexes.get(&(true, false)).expect("symbol index missing");
+                order
+                    .iter()
+                    .map(|&i| {
+                        if idx.full[i].iter().any(|n| n == &sym_norm) {
+                            if file_stem_matches(&chunks[i].path, &sym_name) {
+                                cfg.sym_stem
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![0.0; order.len()]
+            };
+
+            // Natural-language file-stem/path boost.
+            let mut stem_cache: HashMap<String, f64> = HashMap::new();
+            let stem_scores: Vec<f64> = if cfg.stem > 0.0 && !sym_query {
+                order
+                    .iter()
+                    .map(|&i| stem_path_score(&chunks[i].path, &stem_keywords, &mut stem_cache))
+                    .collect()
+            } else {
+                vec![0.0; order.len()]
+            };
+
+            let use_hard_tier = !(cfg.sym_soft > 0.0 && sym_query);
+            let exact_bonus: Vec<f64> = if !use_hard_tier {
+                order
+                    .iter()
+                    .map(|&i| if exact.contains(&i) { cfg.sym_soft * max_base } else { 0.0 })
+                    .collect()
+            } else {
+                vec![0.0; order.len()]
+            };
+
             let score = |i: usize| {
-                let base = if cfg.rrf {
-                    let l = rrf_lex[i] / rrf_norm;
-                    let s = rrf_sem[i] / rrf_norm;
-                    cfg.w * l + (1.0 - cfg.w) * s
-                } else {
-                    cfg.w * bm_rel[i] + (1.0 - cfg.w) * sem_rel[i]
-                };
-                (base + cfg.path * path_scores[i] + cfg.def * def_scores[i]
-                    + cfg.defn * defn_scores[i])
+                (base_scores[i]
+                    + coh_scores[i]
+                    + cfg.path * path_scores[i]
+                    + cfg.def * def_scores[i]
+                    + cfg.defn * defn_scores[i]
+                    + cfg.stem * stem_scores[i]
+                    + cfg.sym * sym_scores[i]
+                    + exact_bonus[i])
                     * penalties[i]
             };
-            let mut fused: Vec<usize> = (0..order.len()).collect();
-            fused.sort_by(|&a, &b| {
-                exact
-                    .contains(&order[b])
-                    .cmp(&exact.contains(&order[a]))
-                    .then_with(|| score(b).total_cmp(&score(a)))
-                    .then_with(|| bm_scores[b].total_cmp(&bm_scores[a]))
-            });
+
+            let mut results: Vec<usize> = Vec::new();
+            let mut fused: Vec<usize> = Vec::new();
+            if cfg.sat == 0.0 && cfg.cap == 0 {
+                fused = (0..order.len()).collect();
+                fused.sort_by(|&a, &b| {
+                    let ea = use_hard_tier && exact.contains(&order[a]);
+                    let eb = use_hard_tier && exact.contains(&order[b]);
+                    eb.cmp(&ea)
+                        .then_with(|| score(b).total_cmp(&score(a)))
+                        .then_with(|| bm_scores[b].total_cmp(&bm_scores[a]))
+                });
+                for &fi in &fused {
+                    let i = order[fi];
+                    let chunk = &chunks[i];
+                    if results.iter().any(|&j| {
+                        chunks[j].path == chunk.path
+                            && chunks[j].start <= chunk.start
+                            && chunk.end <= chunks[j].end
+                    }) {
+                        continue;
+                    }
+                    results.push(i);
+                    if results.len() == opts.top {
+                        break;
+                    }
+                }
+            } else {
+                let mut taken = vec![false; order.len()];
+                let mut file_count: HashMap<&str, usize> = HashMap::new();
+                let mut by_path: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+                while results.len() < opts.top {
+                    if results.len() >= cfg.sel_top {
+                        // After the diversification window the effective score is
+                        // the raw score, so a sorted tail is equivalent to more
+                        // greedy scans and much cheaper for large --top.
+                        let mut rest: Vec<usize> =
+                            (0..order.len()).filter(|&j| !taken[j]).collect();
+                        rest.sort_by(|&a, &b| {
+                            let ea = use_hard_tier && exact.contains(&order[a]);
+                            let eb = use_hard_tier && exact.contains(&order[b]);
+                            eb.cmp(&ea)
+                                .then_with(|| score(b).total_cmp(&score(a)))
+                                .then_with(|| bm_scores[b].total_cmp(&bm_scores[a]))
+                        });
+                        for j in rest {
+                            let i = order[j];
+                            let path = &*chunks[i].path;
+                            if let Some(spans) = by_path.get(path) {
+                                if spans
+                                    .iter()
+                                    .any(|&(s, e)| s <= chunks[i].start && chunks[i].end <= e)
+                                {
+                                    continue;
+                                }
+                            }
+                            by_path
+                                .entry(path)
+                                .or_default()
+                                .push((chunks[i].start, chunks[i].end));
+                            results.push(i);
+                            fused.push(j);
+                            if results.len() == opts.top {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    let mut best: Option<usize> = None;
+                    let mut best_eff = 0.0f64;
+                    let mut best_exact = false;
+                    let mut best_bm = 0.0f64;
+                    for j in 0..order.len() {
+                        if taken[j] {
+                            continue;
+                        }
+                        let i = order[j];
+                        let path = &*chunks[i].path;
+                        if let Some(spans) = by_path.get(path) {
+                            if spans
+                                .iter()
+                                .any(|&(s, e)| s <= chunks[i].start && chunks[i].end <= e)
+                            {
+                                continue;
+                            }
+                        }
+                        let c = file_count.get(path).copied().unwrap_or(0);
+                        let in_window = results.len() < cfg.sel_top;
+                        if in_window && cfg.cap > 0 && c >= cfg.cap {
+                            continue;
+                        }
+                        let eff = score(j)
+                            * if in_window && cfg.sat > 0.0 {
+                                cfg.sat.powi(c as i32)
+                            } else {
+                                1.0
+                            };
+                        let ex = use_hard_tier && exact.contains(&i);
+                        let better = match best {
+                            None => true,
+                            Some(bj) => {
+                                ex.cmp(&best_exact)
+                                    .then_with(|| eff.total_cmp(&best_eff))
+                                    .then_with(|| bm_scores[j].total_cmp(&best_bm))
+                                    == std::cmp::Ordering::Greater
+                            }
+                        };
+                        if better {
+                            best = Some(j);
+                            best_eff = eff;
+                            best_exact = ex;
+                            best_bm = bm_scores[j];
+                        }
+                    }
+                    let Some(j) = best else { break };
+                    taken[j] = true;
+                    let i = order[j];
+                    let path = &*chunks[i].path;
+                    *file_count.entry(path).or_insert(0) += 1;
+                    by_path
+                        .entry(path)
+                        .or_default()
+                        .push((chunks[i].start, chunks[i].end));
+                    results.push(i);
+                    fused.push(j);
+                }
+            }
             let fused_rank: Vec<usize> = {
                 let mut rank = vec![0usize; corpus_len];
                 for (pos, &i) in fused.iter().enumerate() {
@@ -794,22 +1177,7 @@ fn main() {
                 }
                 rank
             };
-            let mut results: Vec<usize> = Vec::new();
-            for &fi in &fused {
-                let i = order[fi];
-                let chunk = &chunks[i];
-                if results.iter().any(|&j| {
-                    chunks[j].path == chunk.path
-                        && chunks[j].start <= chunk.start
-                        && chunk.end <= chunks[j].end
-                }) {
-                    continue;
-                }
-                results.push(i);
-                if results.len() == opts.top {
-                    break;
-                }
-            }
+            sel_ns += t_sel.elapsed().as_nanos();
             let mut unique_paths: Vec<&str> = Vec::new();
             for &i in &results {
                 if !unique_paths.iter().any(|p| *p == &*chunks[i].path) {
@@ -872,7 +1240,7 @@ fn main() {
                     "line_rank": line_rank,
                 }));
             }
-            let rows: Vec<Value> = if cfg.name == "base" || cfg.name == "rows" {
+            let rows: Vec<Value> = if opts.rows || cfg.name == "base" || cfg.name == "rows" {
                 results
                     .iter()
                     .enumerate()
@@ -930,10 +1298,11 @@ fn main() {
     if opts.profile && timed_queries > 0 {
         let n = timed_queries as f64;
         eprintln!(
-            "profile: queries={} defn={:.1} us/q legacy_def={:.1} us/q pen={:.1} us/q rrf={:.1} us/q index={:.1} ms",
+            "profile: queries={} defn={:.1} us/q legacy_def={:.1} us/q sel={:.1} us/q pen={:.1} us/q rrf={:.1} us/q index={:.1} ms",
             timed_queries,
             defn_ns as f64 / 1e3 / n,
             legacy_def_ns as f64 / 1e3 / n,
+            sel_ns as f64 / 1e3 / n,
             pen_ns as f64 / 1e3 / n,
             rrf_ns as f64 / 1e3 / n,
             index_ms,
