@@ -60,7 +60,8 @@
 
 ```sh
 tar -xzf wg-0.1.0-linux-x64.tar.gz    # or a macOS archive
-export PATH="$PWD"/wg-0.1.0-*-*/bin:"$PATH"
+cd wg-0.1.0-*/
+export PATH="$PWD/bin:$PATH"
 wg --version
 ```
 
@@ -75,7 +76,7 @@ From a clone: `cargo install --locked --path . --bin wg`.
 Or install directly from the repository:
 
 ```sh
-cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
+cargo install --locked --git https://github.com/holdfast-labs/wgrep wgrep --bin wg
 ```
 
 ## Quick start

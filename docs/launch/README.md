@@ -105,7 +105,7 @@ Card text:
 
   ```sh
   cargo install --locked --git \
-    https://github.com/holdfast-labs/wgrep --bin wg
+    https://github.com/holdfast-labs/wgrep wgrep --bin wg
   ```
 
 Burned-in captions:

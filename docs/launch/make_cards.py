@@ -49,7 +49,7 @@ MONO_CANDIDATES = [
 REPO_URL = "github.com/holdfast-labs/wgrep"
 INSTALL_LINES = [
     "cargo install --locked --git \\",
-    "  https://github.com/holdfast-labs/wgrep --bin wg",
+    "  https://github.com/holdfast-labs/wgrep wgrep --bin wg",
 ]
 
 

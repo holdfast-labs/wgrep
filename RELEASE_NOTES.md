@@ -56,7 +56,7 @@ cargo install --locked --path . --bin wg
 ```
 
 ```sh
-cargo install --locked --git https://github.com/holdfast-labs/wgrep --bin wg
+cargo install --locked --git https://github.com/holdfast-labs/wgrep wgrep --bin wg
 ```
 
 The first semantic run downloads about 58 MB of model and parser assets. Later
