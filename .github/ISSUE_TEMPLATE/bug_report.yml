@@ -13,7 +13,7 @@ body:
     attributes:
       label: wg version
       description: Run `wg --version`.
-      placeholder: wg 0.1.0
+      placeholder: wg 0.2.0
     validations:
       required: true
   - type: dropdown

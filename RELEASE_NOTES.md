@@ -1,9 +1,10 @@
-# wg v0.1.0
+# wg v0.2.0
 
 `wg` is one local binary for code and text search. It has two routes:
 
-- **Semantic ranking.** `wg QUERY [ROOT]` ranks code chunks with a
-  sgrep-compatible hybrid scorer.
+- **Semantic ranking.** `wg QUERY [ROOT]` ranks code chunks with a hybrid
+  BM25 and embedding scorer. `--rank classic` keeps the sgrep-compatible
+  scorer.
 - **Exact text and regex.** A ripgrep flag such as `-F`, `-e`, `-n`, `-l`, `-g`,
   or `--files` runs the built-in ripgrep 15.1 engine.
 
@@ -11,10 +12,42 @@ One shared daemon keeps a live semantic index and a trigram text index for each
 attached root. One watcher per root feeds both indexes. `wg` does not need `rg`
 on `PATH`.
 
+## What's new in v0.2.0
+
+- **Better default semantic ranking.** The default ranker adds three signals
+  to the fused BM25 and embedding score:
+  - a boost for chunks that define the queried symbol when the whole query is
+    one identifier (for example `ZodType` or `parse_args`), stronger when the
+    file name matches;
+  - a boost for files whose name or parent directory matches the query words;
+  - a small boost for files with several matching chunks.
+- **Measured effect.** On Semble's 63-repo code search benchmark, 31 held-out
+  repositories: NDCG@10 0.687 to 0.761; symbol queries 0.730 to 0.926. On
+  RepoQA held-out, file and line@5 hits do not drop (file H@1/5/10 202/270/283
+  to 202/270/286; line@5 227 both). CoSQA is unchanged. Semble itself scores
+  0.854 on the full set. This is Semble's own benchmark, and the held-out
+  repositories were also used to check earlier candidates, so read it as an
+  estimate. Method: `bench/WG_RANK3_REPORT.md` and `docs/benchmarks.md`.
+- **`--rank classic`** selects the pinned sgrep ranker. Only this mode gives
+  exact sgrep parity.
+- **`--saturate`** is an opt-in diversity flag. It decays repeated chunks of
+  one file in the first ten results. It is off by default because it moves the
+  exact chunk down within the correct file.
+- **`--explain --json`** shows each boost (`coherence`, `symbol`, `stem`,
+  `saturation`).
+- The defined-name index is built with each chunk and follows live edits. It
+  adds about 0.4-0.9 ms per query and about 6 MB at 64k chunks.
+- Install fixes from v0.1.0: the archive `PATH` step and the
+  `cargo install --git` command now work as written.
+
+The speed numbers below are from the v0.1.0 campaign, which used the classic
+ranker. They were not re-measured for v0.2.0.
+
 ## Highlights
 
 - **Warm semantic answers:** 25.2 ms p50, against 565.7 ms for the sgrep CLI
-  (22.4x). Top-10 rows and scores matched pinned sgrep on 5/5 queries.
+  (22.4x). In classic mode, top-10 rows and scores matched pinned sgrep on
+  5/5 queries.
 - **Fresh code:** one-file edit to first correct result, 99.2 ms p50, against
   21.8 s for sgrep (220x). sgrep has no watcher and rebuilds its index.
 - **Many agents:** 16 concurrent clients reached 140.9 queries/s, against 5.5
@@ -39,10 +72,10 @@ machine.
 
 Download the archive for your platform from GitHub Releases:
 
-- Linux x64: `wg-0.1.0-linux-x64.tar.gz`
-- Windows x64: `wg-0.1.0-windows-x64.zip`
-- macOS arm64: `wg-0.1.0-macos-arm64.tar.gz`
-- macOS x64: `wg-0.1.0-macos-x64.tar.gz`
+- Linux x64: `wg-0.2.0-linux-x64.tar.gz`
+- Windows x64: `wg-0.2.0-windows-x64.zip`
+- macOS arm64: `wg-0.2.0-macos-arm64.tar.gz`
+- macOS x64: `wg-0.2.0-macos-x64.tar.gz`
 
 Unpack it, enter the extracted directory, then run `bin/wg` on Linux or macOS,
 or `bin\wg.exe` on Windows, or add `bin/` to `PATH`. The macOS x64 archive is
@@ -124,7 +157,8 @@ archives and attaches it to the release.
 
 ## Credits
 
-- sgrep: semantic ranking. MIT.
+- sgrep: semantic ranking (classic mode). MIT.
+- Semble: design ideas for the symbol, file-stem and coherence signals. MIT.
 - ripgrep 15.1: text engine and walker. MIT or Unlicense.
 - notify: filesystem watcher. CC0.
 - `minishlab/potion-code-16M-v2`: embedding model. MIT. Downloaded at runtime.
