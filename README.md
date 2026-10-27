@@ -53,26 +53,26 @@
 
 | Platform | Archive |
 | --- | --- |
-| Linux x64 | [wg-0.2.0-linux-x64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.2.0-linux-x64.tar.gz) |
-| Windows x64 | [wg-0.2.0-windows-x64.zip](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.2.0-windows-x64.zip) |
-| macOS arm64 | [wg-0.2.0-macos-arm64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.2.0-macos-arm64.tar.gz) |
-| macOS x64 | [wg-0.2.0-macos-x64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.2.0-macos-x64.tar.gz) |
+| Linux x64 | [wg-0.3.0-linux-x64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.3.0-linux-x64.tar.gz) |
+| Windows x64 | [wg-0.3.0-windows-x64.zip](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.3.0-windows-x64.zip) |
+| macOS arm64 | [wg-0.3.0-macos-arm64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.3.0-macos-arm64.tar.gz) |
+| macOS x64 | [wg-0.3.0-macos-x64.tar.gz](https://github.com/holdfast-labs/wgrep/releases/latest/download/wg-0.3.0-macos-x64.tar.gz) |
 
 Verify an archive with its `.sha256` file before you unpack it:
-`sha256sum -c wg-0.2.0-linux-x64.tar.gz.sha256` (macOS: `shasum -a 256 -c ...`;
+`sha256sum -c wg-0.3.0-linux-x64.tar.gz.sha256` (macOS: `shasum -a 256 -c ...`;
 Windows: compare `Get-FileHash` with the file). `SHA256SUMS` lists all
 platforms; use `sha256sum -c --ignore-missing SHA256SUMS`.
 
 ```sh
-tar -xzf wg-0.2.0-linux-x64.tar.gz    # or a macOS archive
-cd wg-0.2.0-*/
+tar -xzf wg-0.3.0-linux-x64.tar.gz    # or a macOS archive
+cd wg-0.3.0-*/
 export PATH="$PWD/bin:$PATH"
 wg --version
 ```
 
 ```powershell
-Expand-Archive wg-0.2.0-windows-x64.zip -DestinationPath .
-$dir = (Get-ChildItem wg-0.2.0-windows-x64-* -Directory)[0].FullName
+Expand-Archive wg-0.3.0-windows-x64.zip -DestinationPath .
+$dir = (Get-ChildItem wg-0.3.0-windows-x64-* -Directory)[0].FullName
 $env:PATH = "$dir\bin;$env:PATH"; wg --version
 ```
 
@@ -140,6 +140,7 @@ Read [docs/agent-guide.md](docs/agent-guide.md) and [llms.txt](llms.txt).
 - [Usage and details](docs/usage.md)
 - [How it works](docs/how-it-works.md)
 - [Agent guide](docs/agent-guide.md)
+- [0.3 changelog and release record](docs/0.3-target.md)
 - [Benchmarks](docs/benchmarks.md)
 - [Release process](docs/release.md)
 

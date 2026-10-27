@@ -1,8 +1,8 @@
-# wg v0.2.0
+# wg v0.3.0
 
 `wg` is one local binary for code and text search. It has two routes:
 
-- **Semantic ranking.** `wg QUERY [ROOT]` ranks code chunks with a hybrid
+- **Semantic ranking.** `wg QUERY [SCOPE]` ranks code chunks with a hybrid
   BM25 and embedding scorer. `--rank classic` keeps the sgrep-compatible
   scorer.
 - **Exact text and regex.** A ripgrep flag such as `-F`, `-e`, `-n`, `-l`, `-g`,
@@ -12,70 +12,44 @@ One shared daemon keeps a live semantic index and a trigram text index for each
 attached root. One watcher per root feeds both indexes. `wg` does not need `rg`
 on `PATH`.
 
-## What's new in v0.2.0
+## What's new in v0.3.0
 
-- **Better default semantic ranking.** The default ranker adds three signals
-  to the fused BM25 and embedding score:
-  - a boost for chunks that define the queried symbol when the whole query is
-    one identifier (for example `ZodType` or `parse_args`), stronger when the
-    file name matches;
-  - a boost for files whose name or parent directory matches the query words;
-  - a small boost for files with several matching chunks.
-- **Measured effect.** On Semble's 63-repo code search benchmark, 31 held-out
-  repositories: NDCG@10 0.687 to 0.761; symbol queries 0.730 to 0.926. On
-  RepoQA held-out, file and line@5 hits do not drop (file H@1/5/10 202/270/283
-  to 202/270/286; line@5 227 both). CoSQA is unchanged. Semble itself scores
-  0.854 on the full set. This is Semble's own benchmark, and the held-out
-  repositories were also used to check earlier candidates, so read it as an
-  estimate. Method: `bench/WG_RANK3_REPORT.md` and `docs/benchmarks.md`.
-- **`--rank classic`** selects the pinned sgrep ranker. Only this mode gives
-  exact sgrep parity.
-- **`--saturate`** is an opt-in diversity flag. It decays repeated chunks of
-  one file in the first ten results. It is off by default because it moves the
-  exact chunk down within the correct file.
-- **`--explain --json`** shows each boost (`coherence`, `symbol`, `stem`,
-  `saturation`).
-- The defined-name index is built with each chunk and follows live edits. It
-  adds about 0.4-0.9 ms per query and about 6 MB at 64k chunks.
-- Install fixes from v0.1.0: the archive `PATH` step and the
-  `cargo install --git` command now work as written.
+- **Semantic scope.** Pass a file or directory to search only that part of the
+  attached root. A missing scope path acts as an empty scope.
+- **Semantic file filters.** Repeat `--semantic-glob GLOB` to include files.
+  Prefix a pattern with `!` to exclude it. Patterns without `/` match file
+  names at any depth; patterns with `/` are root-relative. Windows also accepts
+  native `\` separators. Includes combine with OR; any exclude vetoes a match.
+- **Explicit relevance cutoff.** `--min-score SCORE` keeps chunks whose raw
+  cosine similarity is at least `SCORE`. The value must be finite and in
+  `[-1, 1]`. There is no default cutoff. If nothing passes, JSON output is `[]`
+  and the command returns exit 1.
+- **Scope before ranking.** Scope, globs, and cutoff filter eligible chunks
+  before candidate selection, BM25 statistics, and score normalization. Scoped
+  queries reuse the attached index.
+- **Less duplicate context.** Semantic results drop a same-file chunk when it
+  overlaps an earlier result by at least half of the shorter span. Separate
+  regions in one file stay eligible. Classic ranking keeps its old rule.
+- **Clearer status.** `wg status` distinguishes a pending lazy rescan from
+  active work. Text counts separate persisted records (`postings`) from live
+  files (`indexed`, `files`). A deleted file no longer stays in the live file
+  count until a rebuild.
+- **Calmer file-name boost.** A single matched file-name word among several
+  query words gets half the previous ratio. Whole-query symbol definitions keep
+  their full boost.
 
-The speed numbers below are from the v0.1.0 campaign, which used the classic
-ranker. They were not re-measured for v0.2.0.
-
-## Highlights
-
-- **Warm semantic answers:** 25.2 ms p50, against 565.7 ms for the sgrep CLI
-  (22.4x). In classic mode, top-10 rows and scores matched pinned sgrep on
-  5/5 queries.
-- **Fresh code:** one-file edit to first correct result, 99.2 ms p50, against
-  21.8 s for sgrep (220x). sgrep has no watcher and rebuilds its index.
-- **Many agents:** 16 concurrent clients reached 140.9 queries/s, against 5.5
-  for sgrep (25.4x), with zero errors.
-- **Exact text, faster on selective terms:** absent terms 5.4 ms vs 63.2 ms for
-  `rg` 15.1 (11.7x); rare terms 6.0 ms vs 63.8 ms (10.6x). Common 50.0 vs
-  83.7 ms; broad 111.5 vs 136.1 ms; case-insensitive 37.5 vs 75.7 ms. Output
-  was byte-identical under `--sort path`.
-- **Large trees:** 13,332 files build in 18.4 s (386.2 MiB peak, 212.7 MiB
-  steady). A 94,318-file Linux tree builds in 561.4 s (9m 21s), with 2,774.1
-  MiB peak and 2,040.5 MiB steady RSS.
-
-These values come from one final campaign on one Debian 13 VPS with 4 vCPU,
-7.8 GiB RAM, and no swap. They are single runs, not percentiles over many
-machines. Warm semantic latency is a five-query mixture, not a per-query
-percentile. The sgrep freshness row has 6 samples; the `wg` row has 30. The text
-index only removes files that cannot match. The sgrep CLI pays process start and
-rebuilds after changes. Do not read these numbers as a specification for your
-machine.
+`--explain --json` still shows `coherence`, `symbol`, `stem`, and optional
+`saturation`. Relative and fused scores are ranking values, not confidence
+values.
 
 ## Install
 
 Download the archive for your platform from GitHub Releases:
 
-- Linux x64: `wg-0.2.0-linux-x64.tar.gz`
-- Windows x64: `wg-0.2.0-windows-x64.zip`
-- macOS arm64: `wg-0.2.0-macos-arm64.tar.gz`
-- macOS x64: `wg-0.2.0-macos-x64.tar.gz`
+- Linux x64: `wg-0.3.0-linux-x64.tar.gz`
+- Windows x64: `wg-0.3.0-windows-x64.zip`
+- macOS arm64: `wg-0.3.0-macos-arm64.tar.gz`
+- macOS x64: `wg-0.3.0-macos-x64.tar.gz`
 
 Unpack it, enter the extracted directory, then run `bin/wg` on Linux or macOS,
 or `bin\wg.exe` on Windows, or add `bin/` to `PATH`. The macOS x64 archive is
@@ -99,6 +73,47 @@ on disk). Later runs use the cache. The text route does not need the model or
 On Windows, PowerShell may show the `wg up` progress line in red. It is progress
 output, not an error.
 
+## Semantic examples
+
+```sh
+wg "where do incoming requests get validated" --top 10
+wg "decodePacketV17" --top 5
+wg "teacher logits distilled into the student" trainers --semantic-glob "*.py"
+wg "double surface topology loss" --semantic-glob "*.py" --semantic-glob "!tools/**"
+wg "packet framing" --min-score 0.4 --json
+```
+
+`--min-score` values depend on the model and queries. Choose a value for your
+corpus. Do not treat `semantic_relative` or `fused` as confidence.
+
+## Highlights
+
+The speed and quality numbers below come from the v0.1.0 and v0.2.0 campaigns.
+The 0.3 scope and filter path was not part of those campaigns, and these values
+were not re-measured for v0.3.0.
+
+- **Warm semantic answers:** 25.2 ms p50, against 565.7 ms for the sgrep CLI
+  (22.4x). In classic mode, top-10 rows and scores matched pinned sgrep on
+  5/5 queries.
+- **Fresh code:** one-file edit to first correct result, 99.2 ms p50, against
+  21.8 s for sgrep (220x). sgrep has no watcher and rebuilds its index.
+- **Many agents:** 16 concurrent clients reached 140.9 queries/s, against 5.5
+  for sgrep (25.4x), with zero errors.
+- **Exact text, faster on selective terms:** absent terms 5.4 ms vs 63.2 ms for
+  `rg` 15.1 (11.7x); rare terms 6.0 ms vs 63.8 ms (10.6x). Common 50.0 vs
+  83.7 ms; broad 111.5 vs 136.1 ms; case-insensitive 37.5 vs 75.7 ms. Output
+  was byte-identical under `--sort path`.
+- **Large trees:** 13,332 files build in 18.4 s (386.2 MiB peak, 212.7 MiB
+  steady). A 94,318-file Linux tree builds in 561.4 s (9m 21s), with 2,774.1
+  MiB peak and 2,040.5 MiB steady RSS.
+
+These values come from one campaign on one Debian 13 VPS with 4 vCPU, 7.8 GiB
+RAM, and no swap. They are single runs, not percentiles over many machines.
+Warm semantic latency is a five-query mixture, not a per-query percentile. The
+sgrep freshness row has 6 samples; the `wg` row has 30. The text index only
+removes files that cannot match. The sgrep CLI pays process start and rebuilds
+after changes. Do not read these numbers as a specification for your machine.
+
 ## Service commands
 
 - `wg up --json` includes `pid` in every reply: a new build, a joined build, and
@@ -109,6 +124,8 @@ output, not an error.
   `No wg service is running.` The JSON reply is `{"ok":true,"running":false}`.
 - `wg status` with no daemon exits 2 and prints
   `wg: no wg service is running for this cache; run wg up first`.
+- `wg status` shows `rescan pending`, `rescanning`, or `rebuilding` for the text
+  index. A pending rescan alone does not mean watcher trust failed.
 - The model is fixed at `wg up`. A mismatch error names the attached model and
   says: run `wg down`, then `wg up --model <m>`.
 - On Windows, human-readable output removes the `\\?\` prefix from paths. JSON
@@ -128,11 +145,14 @@ lives in `~/.cache/wgrep`, not `~/Library/Caches`.
 
 ## Known limits
 
-- Semantic results are ranked, not exhaustive.
+- Semantic results are ranked, not exhaustive. Use `-F` or `-e` when you need
+  every match.
+- There is no default semantic relevance cutoff. A safe default needs
+  calibration across models and query sets.
 - The text index only removes impossible files. Common terms still scan much of
   the tree.
 - Text-route commands in scripts need an explicit path. With no path, `rg` reads
-  piped stdin and can wait for EOF.
+  piped stdin and can wait for EOF. Add `-n` when you need line numbers.
 - Memory favors `wg` only at five roots, and the margin is small. Five attached
   13.3k-file roots used 902.9 MiB RSS, against 1,034.1 MiB for five warm sgrep
   processes: 12.7% less. This is not a general multi-repo win. At one root `wg`

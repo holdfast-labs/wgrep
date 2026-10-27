@@ -2411,12 +2411,13 @@ dependencies = [
 
 [[package]]
 name = "wgrep"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "chonkie",
  "clap",
  "crc32fast",
+ "globset",
  "half",
  "hf-hub",
  "memchr",
