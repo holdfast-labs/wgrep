@@ -63,8 +63,8 @@ wg "decodePacketV17" --top 10            # or -k 10
 wg "packet framing" --json --explain --top 5
 
 # Exact text or regex, with ripgrep flags:
-wg -F "fn main" .
-wg -e "fn\s+\w+\(" .
+wg -n -F "fn main" .
+wg -n -e "fn\s+\w+\(" .
 wg -n -e "TODO" .
 wg -l "deprecated" .
 wg -g "*.rs" "unsafe" .
@@ -148,6 +148,9 @@ wg "packet framing" --json --top 20
 wg "packet framing" --json --explain --top 5
 wg "packet framing" --rank classic --top 5
 wg "packet framing" --saturate --top 10
+wg "teacher logits distilled into the student" trainers --semantic-glob "*.py"
+wg "double surface topology loss" --semantic-glob "*.py" --semantic-glob "!tools/**"
+wg "packet framing" --min-score 0.4 --json
 ```
 
 - `--top N` / `-k N` sets the count. The range is 1 to 100. The default is 5.
@@ -157,6 +160,10 @@ wg "packet framing" --saturate --top 10
   `classic` is the pinned sgrep ranker for exact parity.
 - `--saturate` turns on opt-in per-file diversity in the first ten positions.
   It applies only to `--rank semantic`.
+- `--semantic-glob GLOB` adds a semantic file filter. Repeat the flag to add
+  include patterns. Prefix a pattern with `!` to exclude files.
+- `--min-score SCORE` keeps chunks with raw cosine similarity at least `SCORE`.
+  The value must be finite and in `[-1, 1]`. There is no default cutoff.
 - `--model auto|code|text` selects the embedding policy. `auto` is the default.
   A query that names `code` or `text` must match the model used by `wg up`.
   `auto` does not enforce a model. The model is fixed at `wg up`. A mismatch
@@ -177,11 +184,44 @@ fused base score:
   symbol.
 - **Natural-language file-stem/path:** query words of 3 or more characters are
   matched against the file stem and parent directory. A match adds a boost
-  scaled by the match ratio.
+  scaled by the match ratio. One matched word among several query words gets
+  half that ratio, which reduces weak file-name matches.
 
 `--json --explain` shows the added `coherence`, `symbol`, and `stem` fields on
 each row. It also shows `saturation` when `--saturate` is on. Existing fields
 keep their names and meanings.
+
+`semantic` is raw cosine similarity. `semantic_relative` uses min–max
+normalization across the candidate set. A top value of `1.0` does not mean that
+the result is relevant. Relative and fused scores are ranking values, not
+confidence values.
+
+The `--min-score` cutoff applies before ranking fills the shortlist. If no
+chunk passes, `wg` prints `[]` with `--json` and returns exit 1. Cutoff values
+depend on the model and query set. The example value above is not a calibrated
+relevance threshold.
+
+### Semantic scope and file filters
+
+Without an explicit scope path, a semantic query searches the whole nearest
+attached root. Pass a file or directory to search only that part of the root.
+A missing scope path acts as an empty directory scope. Scope does not rebuild
+the index.
+
+`--semantic-glob` patterns without `/` match file names at any depth.
+Patterns with `/` are relative to the attached root, even with a directory
+scope. Include patterns combine with OR. Exclude patterns override includes.
+Globs are case-sensitive. Quote patterns to prevent shell expansion.
+Windows also accepts native `\` separators in root-relative glob patterns.
+
+Scope and cutoff filters apply before candidate selection and normalization.
+Use `-g` for exact search only.
+
+Semantic ranking also removes substantial same-file overlap before it fills
+the shortlist. It keeps the higher-ranked span when two spans share at least
+half of the shorter span. Separate regions in one file remain eligible.
+This rule applies with or without `--saturate`. Classic ranking keeps its
+original containment rule.
 
 `--saturate` keeps the first chunk of a file at full score and multiplies the
 k-th repeat chunk by `0.5^k` inside the first ten positions. Later positions use
@@ -190,11 +230,6 @@ the raw score. It is off by default.
 `--rank classic` keeps the pinned sgrep ranking. In that mode the output rows
 and scores are identical to revision `0fbe8e5`. The parity claim applies to
 classic mode only.
-
-Semantic scope is one whole attached root. Without `ROOT`, `wg` uses the nearest
-attached ancestor of the current directory. A file or subdirectory `ROOT`
-returns an explicit error. The text route accepts files and directories
-normally.
 
 The classic ranker is sgrep-compatible. On the launch corpus, warm top-10 rows
 and scores were identical to pinned sgrep on 5 of 5 queries. Warm semantic
@@ -246,6 +281,19 @@ wg down
 `wg status` shows every attached root, its counts, and its health.
 `wg status --json` is machine-readable. With no daemon, `wg status` exits 2 and
 prints `wg: no wg service is running for this cache; run wg up first`.
+
+The text phase `rescan pending` means that the next eligible indexed text query
+checks the file set. It does not mean that watcher trust failed. Status does
+not start a full walk. `rescanning` means the status call observed an active
+check; the call can wait for that check before it returns. `rebuilding` means
+an active background build. `text.building` reports active work, while
+`text.pending` counts added files that a later build may index.
+
+Root `files` and `chunks` describe the semantic snapshot. `text.postings`
+counts persisted file records, which can include deleted records until a
+rebuild. `text.indexed` counts live files with those records. `text.added`
+counts live files searched directly. `text.files` is their sum. Counts can lag
+while a rescan is pending, and the two indexes can select different file sets.
 
 `wg down` stops the shared daemon. It stops search for every attached root, not
 only the current one. After you stop it, run `wg up` again for the roots you

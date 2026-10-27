@@ -13,9 +13,25 @@
 /// Flags `wg` itself accepts with no value.
 const WG_BOOL: &[&str] = &["--json", "--explain", "--saturate", "-h", "--help", "-V", "--version"];
 /// Flags `wg` itself accepts with a value.
-const WG_VALUE: &[&str] = &["-k", "--top", "--model", "--cache-dir", "--rank"];
+const WG_VALUE: &[&str] = &[
+    "-k",
+    "--top",
+    "--model",
+    "--cache-dir",
+    "--rank",
+    "--semantic-glob",
+    "--min-score",
+];
 /// `wg`-owned value flags that have no meaning in the ripgrep route.
-const WG_SEMANTIC_ONLY: &[&str] = &["-k", "--top", "--model", "--explain", "--rank"];
+const WG_SEMANTIC_ONLY: &[&str] = &[
+    "-k",
+    "--top",
+    "--model",
+    "--explain",
+    "--rank",
+    "--semantic-glob",
+    "--min-score",
+];
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -52,6 +68,11 @@ pub struct Semantic {
     pub rank: String,
     /// Opt-in per-file saturation within the top 10.
     pub saturate: bool,
+    /// Repeatable root-relative include/exclude globs for the files to search.
+    /// A pattern that starts with `!` excludes.
+    pub globs: Vec<String>,
+    /// Optional raw cosine cutoff in `[-1, 1]`. `None` keeps full recall.
+    pub min_score: Option<f64>,
 }
 
 /// Classify `args` and lift the global `--cache-dir` out of every route.
@@ -177,8 +198,9 @@ fn classify_inner(args: &[String]) -> Result<(Invocation, Option<String>), Strin
     if trigger {
         if semantic_only {
             return Err(
-                "cannot combine semantic options (--top/-k/--model/--explain/--rank) with ripgrep \
-                 options; run them as separate commands"
+                "cannot combine semantic options (--top/-k/--model/--explain/--rank/\
+                 --semantic-glob/--min-score) with ripgrep options; run them as \
+                 separate commands"
                     .into(),
             );
         }
@@ -303,6 +325,8 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
     let mut model = "auto".to_owned();
     let mut rank = "semantic".to_owned();
     let mut saturate = false;
+    let mut globs = Vec::new();
+    let mut min_score = None;
     let mut i = 0usize;
     let mut dd = false;
     while i < args.len() {
@@ -395,6 +419,35 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
             i += if inline.is_some() { 1 } else { 2 };
             continue;
         }
+        if name == "--semantic-glob" {
+            let value = match inline {
+                Some(v) => v.to_owned(),
+                None => value_at(args, i + 1, "--semantic-glob")?,
+            };
+            if value.is_empty() || value == "!" {
+                return Err("--semantic-glob needs a non-empty pattern".into());
+            }
+            globs.push(value);
+            i += if inline.is_some() { 1 } else { 2 };
+            continue;
+        }
+        if name == "--min-score" {
+            let value = match inline {
+                Some(v) => v.to_owned(),
+                None => value_at(args, i + 1, "--min-score")?,
+            };
+            let score = value
+                .parse::<f64>()
+                .map_err(|_| format!("--min-score needs a number, got {value:?}"))?;
+            if !score.is_finite() || !(-1.0..=1.0).contains(&score) {
+                return Err(format!(
+                    "--min-score must be a finite value in [-1, 1], got {value:?}"
+                ));
+            }
+            min_score = Some(score);
+            i += if inline.is_some() { 1 } else { 2 };
+            continue;
+        }
         if a.starts_with('-') && a != "-" {
             // Classification only routes unknown flags to ripgrep, so this is
             // defensive: a wg-owned flag shape that skipped the scanner.
@@ -422,6 +475,8 @@ fn parse_semantic(args: &[String]) -> Result<SemanticParse, String> {
         model,
         rank,
         saturate,
+        globs,
+        min_score,
     }))
 }
 
@@ -491,6 +546,63 @@ mod tests {
         assert!(!s.json);
         assert_eq!(s.rank, "semantic");
         assert!(!s.saturate);
+        assert!(s.globs.is_empty());
+        assert_eq!(s.min_score, None);
+    }
+
+    #[test]
+    fn semantic_globs_repeat_and_stay_on_the_semantic_route() {
+        let s = semantic(&[
+            "q",
+            "--semantic-glob",
+            "*.rs",
+            "--semantic-glob=!vendor/**",
+            "--semantic-glob",
+            "src/**",
+        ]);
+        assert_eq!(s.globs, ["*.rs", "!vendor/**", "src/**"]);
+        assert!(matches!(
+            c(&["--semantic-glob", "*.rs", "q"]).0,
+            Invocation::Semantic(_)
+        ));
+        // -g remains an exact-route flag, never a semantic glob.
+        assert_eq!(lexical(&["-g", "*.rs", "q"]), vec!["-g", "*.rs", "q"]);
+    }
+
+    #[test]
+    fn semantic_glob_cannot_mix_with_ripgrep_flags() {
+        let owned: Vec<OsString> = ["q", "--semantic-glob", "*.rs", "-F", "foo"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert!(classify_os(&owned).is_err());
+    }
+
+    #[test]
+    fn min_score_is_parsed_and_must_be_a_finite_cosine() {
+        assert_eq!(
+            semantic(&["q", "--min-score", "0.35"]).min_score,
+            Some(0.35)
+        );
+        assert_eq!(semantic(&["q", "--min-score=-1"]).min_score, Some(-1.0));
+        assert_eq!(semantic(&["q", "--min-score", "1"]).min_score, Some(1.0));
+
+        for bad in ["nan", "inf", "-inf", "-1.01", "1.01", "x", ""] {
+            let owned: Vec<OsString> = ["q", "--min-score", bad]
+                .iter()
+                .map(OsString::from)
+                .collect();
+            assert!(classify_os(&owned).is_err(), "{bad:?} must be rejected");
+        }
+        let owned: Vec<OsString> = ["q", "--min-score"].iter().map(OsString::from).collect();
+        assert!(classify_os(&owned).is_err());
+
+        // The cutoff is semantic-only, like the other wg-owned flags.
+        let owned: Vec<OsString> = ["q", "--min-score", "0.2", "-F", "foo"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert!(classify_os(&owned).is_err());
     }
 
     #[test]

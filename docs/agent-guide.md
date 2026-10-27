@@ -2,7 +2,7 @@
 
 `wg` is one binary with two routes:
 
-- **Semantic ranking (default).** `wg QUERY [ROOT]` returns a ranked shortlist
+- **Semantic ranking (default).** `wg QUERY [SCOPE]` returns a ranked shortlist
   of code chunks.
 - **Exact text and regex.** A ripgrep flag such as `-F`, `-e`, `-n`, `-l`, `-g`,
   or `--files` runs the built-in ripgrep 15.1 engine.
@@ -19,6 +19,8 @@ Use the semantic route when you know the intent but not the exact text:
 ```sh
 wg "where do incoming requests get validated" --top 10
 wg "decodePacketV17" --top 5
+wg "teacher logits distilled into the student" trainers --semantic-glob "*.py"
+wg "double surface topology loss" --semantic-glob "*.py" --semantic-glob "!tools/**"
 ```
 
 Use the text route when you need exact text, a regex, a complete list, or a
@@ -30,8 +32,8 @@ count:
 > stdin from `/dev/null`.
 
 ```sh
-wg -F "exact text" .            # literal
-wg -e "regex pattern" .         # regex
+wg -n -F "exact text" .         # literal with line numbers
+wg -n -e "regex pattern" .      # regex with line numbers
 wg -n -e "pattern" .            # line numbers
 wg -l "pattern" .               # file names only
 wg -c "pattern" .               # match counts by file
@@ -122,10 +124,17 @@ Compare paths after you normalize them.
       "chunks": int,
       "error": string|null,
       "text": {
-        "files": int,
+       "files": int,
+        "postings": int,
+        "indexed": int,
         "dirty": int,
         "added": int,
+        "pending": int,
+        "unindexed": int,
+        "building": boolean,
         "needs_rescan": boolean,
+        "rescanning": boolean,
+        "rebuilding": boolean,
         "unprunable": boolean,
         "walks": {
           "startup": int, "overflow": int, "outside_dep": int,
@@ -205,6 +214,21 @@ A root that is still building has this shape instead. A build in progress has
 
 `--explain` requires `--json`.
 
+The default ranker also reports `coherence`, `symbol`, and `stem` boosts.
+With `--saturate`, it reports a `saturation` factor.
+`--rank classic` keeps the original score fields.
+
+`semantic` is the raw cosine similarity. `semantic_relative` uses min–max
+normalization across the candidate set. Its best value can be `1.0` even when
+the query has no relevant answer. Neither `semantic_relative` nor `fused` is a
+confidence value. A nonempty shortlist does not prove that an answer is relevant.
+
+Use `--min-score SCORE` for an explicit raw-cosine cutoff in `[-1, 1]`.
+The value must be finite. There is no default cutoff or universal relevance
+threshold. Choose the value for your model and queries. The cutoff applies
+before ranking fills the shortlist. If no chunk passes, JSON output is `[]`
+and the command returns exit 1.
+
 ## Text output
 
 With ripgrep flags, `--json` prints ripgrep JSON. It is newline-delimited JSON
@@ -215,8 +239,37 @@ For stable machine output, use explicit formatting such as `--color never` or
 `--json`. Without `--sort path`, ripgrep traversal order is not stable. Use
 `--sort path` when you compare output bytes.
 
+Pass `-n` when an agent needs line numbers. Piped exact output follows ripgrep
+defaults and can omit line numbers without this flag.
+
 The text route runs in the `wg` process. There is no `rg` child and no output
 cap in `wg`. The engine is ripgrep 15.1, so its own limits and behavior apply.
+
+### Text status states and counts
+
+`needs_rescan: true` means that a full file-set check is due. The next eligible
+indexed text query performs that check. Status does not start a full walk.
+Human output shows `rescan pending`. This state alone does not mean that
+watcher trust failed or that the daemon needs a restart.
+
+`rebuilding` identifies an active background index build. `rescanning` means
+the status call observed an active file-set check. The call can wait for that
+check and return fresh counts with `rescanning: true`. `text.building` is true
+for either active-work indicator. `text.pending` counts added files that a
+later build may index; it does not mean that a build is active.
+
+The count fields describe different sets:
+
+- Root `files` and `chunks` count the semantic snapshot.
+- `text.postings` counts persisted file records, including records for deleted files until a rebuild.
+- `text.indexed` counts live files with a persisted record.
+- `text.added` counts live files searched directly outside those records.
+- `text.files` is `text.indexed + text.added`.
+- `text.unindexed` counts direct candidates that do not await another index attempt.
+
+File-set counts can lag while a rescan is pending. Semantic and text counts
+need not match. Use live counts after updates settle; do not compare semantic
+file counts with persisted text-record counts.
 
 ### Text index and fallbacks
 
@@ -263,10 +316,22 @@ The text route reads the live bytes of each candidate file. Changes become
 visible when the OS delivers their watcher event. If the index cannot prove
 freshness, `wg` scans the full tree. A full scan is always correct.
 
-Semantic scope is one whole attached root. Without `ROOT`, `wg` picks the
-nearest attached ancestor of the current directory. A semantic query that names
-a file or a smaller directory fails with an explicit error. The text route
-accepts files and directories normally.
+Without `SCOPE`, semantic search uses the nearest attached ancestor of the
+current directory and searches that whole root. An explicit file or directory
+limits search within the attached root. A missing scope path acts as an empty
+directory scope. Scope reuses the attached index.
+
+Use repeatable `--semantic-glob GLOB` filters to select files. A pattern without
+`/`, such as `*.py`, matches file names at any depth. A pattern with `/`, such
+as `src/**`, is relative to the attached root, even with a directory scope.
+Include patterns combine with OR. A pattern with a leading `!` excludes files
+and overrides all include patterns. Globs are case-sensitive. Quote patterns
+so the shell does not expand them.
+Windows also accepts native `\` separators in root-relative glob patterns.
+
+Scope and cutoff filters apply before candidate selection and score
+normalization. An empty eligible set returns exit 1. `-g` remains an exact-route
+flag; it does not filter semantic results.
 
 ## Recovery
 
@@ -276,6 +341,8 @@ accepts files and directories normally.
 - **Untrusted text index:** text searches fall back to a full scan.
   `wg status --json` shows `text.untrusted: true`. Run `wg down`, then `wg up` to
   restore index pruning.
+- **Text rescan pending:** an eligible indexed text query checks the file set.
+  If `text.untrusted` is false, this state alone needs no daemon restart.
 - **Failed build:** `wg status --json` shows `error`. The next single `wg up`
   retries the build in the same call. If the new build fails, that call returns
   the new error. Check the cause, then run `wg up` again.
@@ -293,7 +360,8 @@ accepts files and directories normally.
 
 - Do not use `-n` to set a semantic count. A bare `-n` selects ripgrep line
   numbers and the text route. Use `--top` or `-k` for the semantic count.
-- Do not mix the semantic options `--top`, `-k`, `--model`, or `--explain` with
+- Do not mix semantic options such as `--top`, `-k`, `--model`, `--explain`,
+  `--semantic-glob`, or `--min-score` with
   ripgrep flags. `wg` rejects that combination. Run the two searches as separate
   commands.
 - Do not treat a model-ranked result list as an exhaustive grep.

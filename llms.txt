@@ -30,7 +30,7 @@ No `rg` binary is needed. Release archives ship only the `wg` binary.
 ## Commands
 
 - wg up [PATH] [--model auto|code|text] [--json]
-- wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text] [--rank semantic|classic] [--saturate]
+- wg QUERY [SCOPE] [--top N|-k N] [--json] [--explain] [--model auto|code|text] [--rank semantic|classic] [--saturate] [--semantic-glob GLOB]... [--min-score SCORE]
 - wg [RIPGREP-FLAGS] PATTERN [PATH...]
 - wg status [--json]
 - wg down
@@ -56,10 +56,16 @@ No `rg` binary is needed. Release archives ship only the `wg` binary.
   stdin when stdin is a pipe. Use `-` to read stdin on purpose.
 - `--json` alone is a semantic JSON array. `--json` with ripgrep flags is
   ripgrep JSON events.
-- Semantic scope is one whole attached root. A file or subdirectory semantic
-  scope returns an explicit error.
+- A semantic query can take a file or directory SCOPE under the attached root.
+  Repeat `--semantic-glob GLOB` to include files; prefix `!` to exclude.
+  Patterns without `/` match file names at any depth; patterns with `/` are
+  root-relative. `-g` remains an exact-route flag.
+- `--min-score SCORE` keeps raw cosine similarity at least SCORE (finite,
+  `[-1, 1]`). There is no default cutoff. If nothing passes, output is `[]` and exit is 1.
 - `wg status --json` reports readiness. A ready root has `ready: true`,
-  `pending: 0`, and `text` not null or `text_error` a string.
+  `pending: 0`, and `text` not null or `text_error` a string. The text fields
+  distinguish `needs_rescan` (lazy pending check), `rescanning`/`rebuilding`
+  (active work), and persisted `postings` from live `indexed`/`files` counts.
 - `wg up` is safe under captured output. The daemon is detached and inherits
   only its log.
 - `wg up --json` always includes `pid`, the daemon PID. This holds for a new

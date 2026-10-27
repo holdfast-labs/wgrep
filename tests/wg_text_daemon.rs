@@ -6,7 +6,7 @@
 //! pipes and proves that the daemon does not keep them open.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -325,13 +325,137 @@ fn set_mtime_secs_ago(path: &std::path::Path, seconds: u64) {
         .unwrap();
 }
 
-fn text_status(scratch: &Scratch) -> serde_json::Value {
+fn root_status(scratch: &Scratch) -> serde_json::Value {
     let mut status = wg_command(scratch);
     status.args(["status", "--json"]);
     let status = run_bounded(status, 60);
     assert!(status.status.success(), "status failed");
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
-    value["roots"][0]["text"].clone()
+    value["roots"][0].clone()
+}
+
+fn text_status(scratch: &Scratch) -> serde_json::Value {
+    root_status(scratch)["text"].clone()
+}
+
+/// Wait until the root is idle and `predicate` accepts its status.
+fn root_status_until(
+    scratch: &Scratch,
+    predicate: impl Fn(&serde_json::Value) -> bool,
+    seconds: u64,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        // A pending text rescan is lazy. A status request does not run it.
+        text_token(scratch, "needle");
+        let value = root_status(scratch);
+        let settled = value["pending"].as_u64() == Some(0)
+            && value["text"]["needs_rescan"] == false
+            && value["text"]["rescanning"] == false
+            && value["text"]["rebuilding"] == false;
+        if settled && predicate(&value) {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "root status never settled as expected: {value}"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn text_token(scratch: &Scratch, token: &str) -> Vec<u8> {
+    text_query(
+        scratch,
+        &[
+            "--sort",
+            "path",
+            "-n",
+            token,
+            scratch.root.to_str().unwrap(),
+        ],
+    )
+}
+
+fn text_token_until(
+    scratch: &Scratch,
+    token: &str,
+    predicate: impl Fn(&[u8]) -> bool,
+    seconds: u64,
+) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let output = text_token(scratch, token);
+        if predicate(&output) {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "text output never reached the expected state:\n{}",
+            String::from_utf8_lossy(&output)
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Semantic result paths with an exact identifier hit for `query`. This checks
+/// the new content, not merely a path that also appears in an unrelated hit.
+fn semantic_paths(scratch: &Scratch, query: &str) -> Vec<String> {
+    let mut command = wg_command(scratch);
+    command.args([
+        query,
+        scratch.root.to_str().unwrap(),
+        "--json",
+        "--explain",
+        "--top",
+        "50",
+    ]);
+    let outcome = run_bounded(command, 120);
+    assert!(
+        outcome.status.success() || outcome.status.code() == Some(1),
+        "semantic query failed: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_slice(&outcome.stdout).expect("semantic json");
+    rows.iter()
+        .filter(|row| row["scores"]["exact_identifier"] == true)
+        .filter_map(|row| row["path"].as_str())
+        .map(|path| path.replace('\\', "/"))
+        .collect()
+}
+
+fn semantic_until(
+    scratch: &Scratch,
+    query: &str,
+    predicate: impl Fn(&[String]) -> bool,
+    seconds: u64,
+) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let paths = semantic_paths(scratch, query);
+        if predicate(&paths) {
+            return paths;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "semantic output never reached the expected state: {paths:?}"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -509,6 +633,158 @@ fn text_index_sees_edits_creates_deletes_renames_and_gitignore_changes() {
         &query_until(&scratch, |out| has(out, "ignored.rs"), 15),
         "ignored.rs"
     ));
+}
+
+/// One lifecycle through the daemon watcher. The semantic root count and the
+/// text route must both settle on the new file set, and the semantic state
+/// must match a fresh index built from the same files.
+#[test]
+fn watcher_keeps_semantic_and_text_state_fresh_across_a_lifecycle() {
+    let scratch = Scratch::new("lifecycle-status");
+    scratch.fixture();
+    let _daemon = Daemon::start(&scratch, &[]);
+
+    let base = root_status_until(&scratch, |root| root["files"].as_u64() == Some(3), 60);
+    let base_files = base["files"].as_u64().unwrap();
+    assert_eq!(base_files, 3, "{base}");
+    assert_eq!(base["text"]["files"].as_u64(), Some(3), "{base}");
+    assert!(
+        semantic_paths(&scratch, "alpha").iter().any(|p| p.ends_with("src/a.rs")),
+        "baseline semantic query did not see src/a.rs"
+    );
+
+    // Create.
+    scratch.write(
+        "src/created.rs",
+        "fn created() { let lifecycle_created_token = 11; }\n",
+    );
+    semantic_until(
+        &scratch,
+        "lifecycle_created_token",
+        |paths| paths.iter().any(|p| p.ends_with("src/created.rs")),
+        30,
+    );
+    let created = root_status_until(
+        &scratch,
+        |root| root["files"].as_u64() == Some(base_files + 1),
+        30,
+    );
+    assert_eq!(created["files"], base_files + 1, "{created}");
+    assert_eq!(created["text"]["files"].as_u64(), Some(4), "{created}");
+    assert!(
+        has(
+            &text_token_until(
+                &scratch,
+                "lifecycle_created_token",
+                |out| has(out, "src/created.rs"),
+                30
+            ),
+            "src/created.rs"
+        ),
+        "the text route missed the created file"
+    );
+
+    // Edit.
+    scratch.write(
+        "src/b.rs",
+        "fn beta() { let lifecycle_edited_token = 12; }\n",
+    );
+    semantic_until(
+        &scratch,
+        "lifecycle_edited_token",
+        |paths| paths.iter().any(|p| p.ends_with("src/b.rs")),
+        30,
+    );
+    assert!(
+        has(
+            &text_token_until(
+                &scratch,
+                "lifecycle_edited_token",
+                |out| has(out, "src/b.rs"),
+                30
+            ),
+            "src/b.rs"
+        ),
+        "the text route missed the edited file"
+    );
+    let edited = root_status_until(
+        &scratch,
+        |root| root["files"].as_u64() == Some(base_files + 1),
+        30,
+    );
+    assert_eq!(edited["files"], base_files + 1, "{edited}");
+
+    // Rename.
+    std::fs::rename(
+        scratch.root.join("src/created.rs"),
+        scratch.root.join("src/renamed.rs"),
+    )
+    .unwrap();
+    let renamed = semantic_until(
+        &scratch,
+        "lifecycle_created_token",
+        |paths| paths.iter().any(|p| p.ends_with("src/renamed.rs")),
+        30,
+    );
+    assert!(
+        !renamed.iter().any(|p| p.ends_with("src/created.rs")),
+        "the semantic route kept the old path: {renamed:?}"
+    );
+    let text_renamed = text_token_until(
+        &scratch,
+        "lifecycle_created_token",
+        |out| has(out, "src/renamed.rs"),
+        30,
+    );
+    assert!(!has(&text_renamed, "src/created.rs"), "text kept the old path");
+    let after_rename = root_status_until(
+        &scratch,
+        |root| root["files"].as_u64() == Some(base_files + 1),
+        30,
+    );
+    assert_eq!(after_rename["files"], base_files + 1, "{after_rename}");
+
+    // Delete.
+    std::fs::remove_file(scratch.root.join("src/renamed.rs")).unwrap();
+    semantic_until(
+        &scratch,
+        "lifecycle_created_token",
+        |paths| !paths.iter().any(|p| p.ends_with("src/renamed.rs")),
+        30,
+    );
+    text_token_until(
+        &scratch,
+        "lifecycle_created_token",
+        |out| !has(out, "src/renamed.rs"),
+        30,
+    );
+    let settled = root_status_until(
+        &scratch,
+        |root| root["files"].as_u64() == Some(base_files),
+        30,
+    );
+    assert_eq!(settled["files"], base_files, "{settled}");
+    assert_eq!(settled["text"]["files"].as_u64(), Some(3), "{settled}");
+    assert_eq!(
+        settled["text"]["indexed"].as_u64(),
+        Some(3),
+        "the live text count must drop when a file is deleted: {settled}"
+    );
+
+    // Fresh index on the same content. The text and semantic file sets can
+    // differ by design, so compare each route with itself, not across routes.
+    let fresh = Scratch::new("lifecycle-status-fresh");
+    copy_tree(&scratch.root, &fresh.root);
+    let _fresh_daemon = Daemon::start(&fresh, &[]);
+    let fresh_base = root_status_until(&fresh, |root| root["files"].as_u64() == Some(3), 60);
+    assert_eq!(fresh_base["files"], settled["files"], "semantic files differ");
+    assert_eq!(fresh_base["chunks"], settled["chunks"], "semantic chunks differ");
+    assert_eq!(
+        fresh_base["text"]["files"], settled["text"]["files"],
+        "text files differ"
+    );
+    // Freshly copied files can remain direct candidates during the racy-write
+    // window. Compare the live file set, not its persisted/added split.
 }
 
 #[test]

@@ -30,6 +30,7 @@ pub mod live;
 // authoritative `rg` child used by the lexical route. Additive; the one-shot
 // `sgrep` CLI is unchanged.
 pub mod lexical;
+pub mod semantic_scope;
 pub mod shared;
 mod splitter;
 
@@ -1126,10 +1127,18 @@ fn rank_impl<R: RankRow>(
             if explain {
                 chunk.scores = Some(scores_at(i, None));
             }
-            if results
-                .iter()
-                .any(|c| c.path == chunk.path && c.start <= chunk.start && chunk.end <= c.end)
-            {
+            let overlaps = results.iter().any(|c| {
+                c.path == chunk.path
+                    && if new_rank {
+                        rank_signals::spans_substantially_overlap(
+                            (c.start, c.end),
+                            (chunk.start, chunk.end),
+                        )
+                    } else {
+                        c.start <= chunk.start && chunk.end <= c.end
+                    }
+            });
+            if overlaps {
                 continue;
             }
             results.push(chunk);
@@ -1162,9 +1171,10 @@ fn rank_impl<R: RankRow>(
                 let i = order[j];
                 let path = rows[i].rank_path();
                 if let Some(spans) = by_path.get(path) {
+                    let span = (rows[i].rank_start(), rows[i].rank_end());
                     if spans
                         .iter()
-                        .any(|&(s, e)| s <= rows[i].rank_start() && rows[i].rank_end() <= e)
+                        .any(|&(s, e)| rank_signals::spans_substantially_overlap((s, e), span))
                     {
                         continue;
                     }
@@ -1196,9 +1206,10 @@ fn rank_impl<R: RankRow>(
             let i = order[j];
             let path = rows[i].rank_path();
             if let Some(spans) = by_path.get(path) {
+                let span = (rows[i].rank_start(), rows[i].rank_end());
                 if spans
                     .iter()
-                    .any(|&(s, e)| s <= rows[i].rank_start() && rows[i].rank_end() <= e)
+                    .any(|&(s, e)| rank_signals::spans_substantially_overlap((s, e), span))
                 {
                     continue;
                 }
@@ -1594,6 +1605,34 @@ mod rank_tests {
     }
 
     #[test]
+    fn weak_single_word_stem_match_does_not_overtake_a_relevant_file() {
+        let chunks = vec![
+            chunk("src/pipeline.rs", "surface render pipeline"),
+            chunk("src/surface_layer.rs", "surface only distractor"),
+            chunk("src/unrelated.rs", "nothing"),
+        ];
+        let lexical = [0.90, 0.70, 0.0];
+        let sims = [0.90, 0.70, 0.0];
+        let out = run(
+            RankMode::Semantic,
+            "surface render",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            false,
+        );
+        assert_eq!(&*out[0].path, "src/pipeline.rs");
+        assert_eq!(out[0].scores.as_ref().unwrap().stem, Some(0.0));
+        let distractor = out
+            .iter()
+            .find(|c| &*c.path == "src/surface_layer.rs")
+            .unwrap();
+        let stem = distractor.scores.as_ref().unwrap().stem.unwrap();
+        assert!((stem - 0.15).abs() < 1e-12, "damped stem boost was {stem}");
+    }
+
+    #[test]
     fn saturation_is_opt_in_and_decays_repeats() {
         let chunks = vec![
             chunk_at("a.rs", 1, 2, "first"),
@@ -1632,6 +1671,78 @@ mod rank_tests {
         assert_eq!(saturated[0].scores.as_ref().unwrap().saturation, Some(1.0));
         assert_eq!(saturated[1].scores.as_ref().unwrap().saturation, Some(1.0));
         assert_eq!(saturated[2].scores.as_ref().unwrap().saturation, Some(0.5));
+    }
+
+    #[test]
+    fn semantic_suppresses_substantial_same_file_overlap() {
+        let chunks = vec![
+            chunk_at("a.rs", 1, 60, "alpha first"),
+            chunk_at("a.rs", 20, 80, "alpha overlap"),
+            chunk_at("a.rs", 100, 110, "alpha disjoint"),
+            chunk_at("b.rs", 1, 10, "alpha other"),
+            chunk_at("c.rs", 1, 5, "alpha last"),
+        ];
+        let lexical = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let sims = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let out = run(
+            RankMode::Semantic,
+            "alpha",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            false,
+        );
+        let spans: Vec<(usize, usize)> = out.iter().map(|c| (c.start, c.end)).collect();
+        assert_eq!(spans, [(1, 60), (100, 110), (1, 10), (1, 5)]);
+    }
+
+    #[test]
+    fn saturated_semantic_keeps_disjoint_regions() {
+        let chunks = vec![
+            chunk_at("a.rs", 1, 60, "alpha first"),
+            chunk_at("a.rs", 20, 80, "alpha overlap"),
+            chunk_at("a.rs", 100, 110, "alpha disjoint"),
+            chunk_at("b.rs", 1, 10, "alpha other"),
+            chunk_at("c.rs", 1, 5, "alpha last"),
+        ];
+        let lexical = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let sims = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let out = run(
+            RankMode::Semantic,
+            "alpha",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            true,
+        );
+        let spans: Vec<(usize, usize)> = out.iter().map(|c| (c.start, c.end)).collect();
+        assert_eq!(spans, [(1, 60), (1, 10), (100, 110), (1, 5)]);
+    }
+
+    #[test]
+    fn classic_partial_overlap_is_unchanged() {
+        let chunks = vec![
+            chunk_at("a.rs", 1, 60, "alpha first"),
+            chunk_at("a.rs", 20, 80, "alpha overlap"),
+            chunk_at("a.rs", 100, 110, "alpha disjoint"),
+            chunk_at("b.rs", 1, 10, "alpha other"),
+            chunk_at("c.rs", 1, 5, "alpha last"),
+        ];
+        let lexical = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let sims = [1.0, 0.9, 0.8, 0.75, 0.0];
+        let out = run(
+            RankMode::Classic,
+            "alpha",
+            &chunks,
+            &lexical,
+            &sims,
+            HashSet::new(),
+            false,
+        );
+        let spans: Vec<(usize, usize)> = out.iter().map(|c| (c.start, c.end)).collect();
+        assert_eq!(spans, [(1, 60), (20, 80), (100, 110), (1, 10), (1, 5)]);
     }
 
     #[test]

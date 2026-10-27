@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,9 @@ pub struct TextIndex {
     walk_root: PathBuf,
     state: Arc<RwLock<daemon::State>>,
     pending: Arc<daemon::PendingSet>,
+    /// Set while a reconcile holds the state lock. Kept here so status can
+    /// report active work without first waiting for that lock.
+    reconciling: Arc<AtomicBool>,
     health: watch_budget::Health,
     ingress: watch_budget::Ingress,
     index_file: PathBuf,
@@ -123,7 +126,7 @@ impl TextIndex {
             root_arg.clone(),
             walk_root.clone(),
             index,
-            reconciling,
+            reconciling.clone(),
             missed,
         )));
         if built {
@@ -148,6 +151,7 @@ impl TextIndex {
             walk_root,
             state,
             pending,
+            reconciling,
             health,
             ingress,
             index_file,
@@ -205,9 +209,16 @@ impl TextIndex {
     }
 
     /// Live state for `wg status` plus on-disk and resident size estimates.
+    ///
+    /// A reconcile holds the state write lock for its whole walk, so status
+    /// captures the flag first. If it was set, the call waited for that walk
+    /// and reports the fresh counters with `rescanning` true.
     pub fn status(&self) -> serde_json::Value {
+        let rescanning = self.reconciling.load(Ordering::Relaxed);
         let state = self.state.read().unwrap();
         let mut value = state.text_stats();
+        let rescanning = rescanning || value["rescanning"].as_bool().unwrap_or(false);
+        value["rescanning"] = serde_json::json!(rescanning);
         let current = store::current(&self.walk_root).unwrap_or_else(|| self.index_file.clone());
         let disk_bytes = std::fs::metadata(&current).map(|m| m.len()).unwrap_or(0);
         let resident = resident_bytes(&current).unwrap_or(disk_bytes);

@@ -1,9 +1,11 @@
 //! Analysis-only batch scorer for wg ranking experiments.
 //!
-//! Baseline reproduces `rank_impl` exactly. Optional, off-by-default signals:
-//! definition-name boost (IDF/coverage/stemming), query gate, narrow definition
-//! keywords per language, test/legacy path penalty, and RRF fusion. This file
-//! is not part of the product.
+//! The semantic path matches `rank_impl` as of 0.3: damped one-word file-stem
+//! boost and substantial same-file overlap removal. Optional, off-by-default
+//! signals: definition-name boost (IDF/coverage/stemming), query gate, narrow
+//! definition keywords per language, test/legacy path penalty, and RRF fusion.
+//! A config with no semantic reranker knob keeps the classic containment rule.
+//! This file is not part of the product.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -422,7 +424,8 @@ fn keyword_matches(keywords: &HashSet<String>, parts: &HashSet<String>) -> usize
     n
 }
 
-/// Semble's NL file-stem/path boost for one path, in [0, 1].
+/// Semble's NL file-stem/path boost for one path, in [0, 1]. One matched word
+/// among several query words gets half the ratio, matching `rank_signals`.
 fn stem_path_score(path: &str, keywords: &HashSet<String>, cache: &mut HashMap<String, f64>) -> f64 {
     if keywords.is_empty() {
         return 0.0;
@@ -446,13 +449,30 @@ fn stem_path_score(path: &str, keywords: &HashSet<String>, cache: &mut HashMap<S
     }
     let n = keyword_matches(keywords, &parts);
     let score = if n > 0 {
-        let ratio = n as f64 / keywords.len() as f64;
+        let mut ratio = n as f64 / keywords.len() as f64;
+        if n == 1 && keywords.len() > 1 {
+            ratio *= 0.5;
+        }
         if ratio >= 0.10 { ratio } else { 0.0 }
     } else {
         0.0
     };
     cache.insert(path.to_string(), score);
     score
+}
+
+/// True when two 1-based inclusive line spans share at least half of the
+/// shorter span. Matches `rank_signals::spans_substantially_overlap` for the
+/// semantic ranker.
+fn spans_substantially_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
+    let lo = a.0.max(b.0);
+    let hi = a.1.min(b.1);
+    if hi < lo {
+        return false;
+    }
+    let overlap = hi - lo + 1;
+    let shorter = (a.1 - a.0 + 1).min(b.1 - b.0 + 1);
+    overlap.saturating_mul(2) >= shorter
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -1056,6 +1076,19 @@ fn main() {
                     * penalties[i]
             };
 
+            // The plain baseline keeps the classic containment rule. A config
+            // that adds a semantic reranker knob follows the 0.3 semantic rule.
+            let new_rank = cfg.path > 0.0
+                || cfg.def > 0.0
+                || cfg.defn != 0.0
+                || cfg.pen > 0.0
+                || cfg.rrf
+                || cfg.sat > 0.0
+                || cfg.cap > 0
+                || cfg.coh > 0.0
+                || cfg.stem > 0.0
+                || cfg.sym > 0.0
+                || cfg.sym_soft > 0.0;
             let mut results: Vec<usize> = Vec::new();
             let mut fused: Vec<usize> = Vec::new();
             if cfg.sat == 0.0 && cfg.cap == 0 {
@@ -1072,8 +1105,14 @@ fn main() {
                     let chunk = &chunks[i];
                     if results.iter().any(|&j| {
                         chunks[j].path == chunk.path
-                            && chunks[j].start <= chunk.start
-                            && chunk.end <= chunks[j].end
+                            && if new_rank {
+                                spans_substantially_overlap(
+                                    (chunks[j].start, chunks[j].end),
+                                    (chunk.start, chunk.end),
+                                )
+                            } else {
+                                chunks[j].start <= chunk.start && chunk.end <= chunks[j].end
+                            }
                     }) {
                         continue;
                     }
@@ -1104,10 +1143,14 @@ fn main() {
                             let i = order[j];
                             let path = &*chunks[i].path;
                             if let Some(spans) = by_path.get(path) {
-                                if spans
-                                    .iter()
-                                    .any(|&(s, e)| s <= chunks[i].start && chunks[i].end <= e)
-                                {
+                                let span = (chunks[i].start, chunks[i].end);
+                                if spans.iter().any(|&(s, e)| {
+                                    if new_rank {
+                                        spans_substantially_overlap((s, e), span)
+                                    } else {
+                                        s <= span.0 && span.1 <= e
+                                    }
+                                }) {
                                     continue;
                                 }
                             }
@@ -1134,10 +1177,14 @@ fn main() {
                         let i = order[j];
                         let path = &*chunks[i].path;
                         if let Some(spans) = by_path.get(path) {
-                            if spans
-                                .iter()
-                                .any(|&(s, e)| s <= chunks[i].start && chunks[i].end <= e)
-                            {
+                            let span = (chunks[i].start, chunks[i].end);
+                            if spans.iter().any(|&(s, e)| {
+                                if new_rank {
+                                    spans_substantially_overlap((s, e), span)
+                                } else {
+                                    s <= span.0 && span.1 <= e
+                                }
+                            }) {
                                 continue;
                             }
                         }
@@ -1346,4 +1393,31 @@ fn main() {
     }
 
     std::fs::write(&opts.out, serde_json::to_vec(&out).unwrap()).expect("write output");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranking_matches_production_stem_damping_and_overlap() {
+        let many: HashSet<String> = ["parser", "zzz", "yyy", "xxx"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut cache = HashMap::new();
+        assert!((stem_path_score("src/parser.rs", &many, &mut cache) - 0.125).abs() < 1e-12);
+
+        let full: HashSet<String> = ["parser", "read"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut cache = HashMap::new();
+        assert_eq!(stem_path_score("src/parser/reader.rs", &full, &mut cache), 1.0);
+
+        assert!(spans_substantially_overlap((1, 60), (20, 80)));
+        assert!(spans_substantially_overlap((1, 10), (5, 10)));
+        assert!(!spans_substantially_overlap((1, 60), (50, 120)));
+        assert!(!spans_substantially_overlap((1, 10), (11, 20)));
+    }
 }

@@ -3,6 +3,7 @@
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use wgrep::live::{BuildProgress, LiveIndex, ModelPool};
+use wgrep::semantic_scope::{ScopePath, SemanticScope};
 use wgrep::{ModelChoice, RankMode, Result};
 use wisp_grep::text::{TextGroup, TextIndex, TextPlan};
 use std::collections::{HashMap, HashSet};
@@ -404,25 +405,39 @@ fn request_timeout(v: serde_json::Value, whole: Duration) -> Result<serde_json::
     Ok(r)
 }
 
-/// Status for one text index. The engine reports `files` as the indexed
-/// postings only, and `added` as walked files searched directly. `pending`
-/// means a rebuild will still try those files; `unindexed` means the builder
-/// cannot index them (UTF-16 BOM, high-diversity, unreadable) and they stay
-/// candidates. Report the total the text route knows.
+/// Status for one text index.
+///
+/// Count fields:
+/// - `postings`: records in the persisted index. A delete clears only a live
+///   flag until a rebuild rewrites the index, so this can exceed the files
+///   that exist now.
+/// - `indexed`: live files with a persisted record.
+/// - `added`: live files the walker saw that the index does not hold. Those
+///   are searched directly as candidates.
+/// - `files`: `indexed + added`, the file set the text route covers. It can
+///   differ from the semantic root count because the two indexes can select
+///   different files.
+/// - `pending`: added files a rebuild may still index (racy writes).
+/// - `unindexed`: added files the builder will not index (UTF-16 BOM,
+///   high-diversity, unreadable); they stay candidates.
+///
+/// `needs_rescan` means a lazy full walk is due but no work runs. `rescanning`
+/// and `rebuilding` are active work. `building` is true only for active work,
+/// so it no longer means merely "a rebuild may be due".
 fn text_status(text: &Arc<TextIndex>) -> serde_json::Value {
     decorate_text_status(text.status())
 }
 
-/// Add the totals `wg status` shows. `building` means a rebuild is due, so
-/// `pending > 0`. A lazily cleared `needs_rescan` is not a rebuild; `wg status`
-/// shows it as the `reconciling` phase instead.
+/// Normalize the engine counters for `wg status`.
 fn decorate_text_status(mut value: serde_json::Value) -> serde_json::Value {
-    let indexed = value["files"].as_u64().unwrap_or(0);
+    let files = value["files"].as_u64().unwrap_or(0);
     let added = value["added"].as_u64().unwrap_or(0);
-    let pending = value["pending"].as_u64().unwrap_or(0);
+    let indexed = value["indexed"].as_u64().unwrap_or(files.saturating_sub(added));
+    let rescanning = value["rescanning"].as_bool().unwrap_or(false);
+    let rebuilding = value["rebuilding"].as_bool().unwrap_or(false);
     value["indexed"] = serde_json::json!(indexed);
     value["files"] = serde_json::json!(indexed + added);
-    value["building"] = serde_json::json!(pending > 0);
+    value["building"] = serde_json::json!(rescanning || rebuilding);
     value
 }
 
@@ -1076,26 +1091,47 @@ fn process(service: &Arc<Service>, req: serde_json::Value) -> serde_json::Value 
                 }
                 (root, r.index.clone(), r.pending.clone(), r.lost.clone())
             };
-            let scope = if whole_repo {
-                &root
-            } else if p.is_file() {
-                return Err(
-                    "file-scoped semantic queries are not supported by the live index API".into(),
-                );
-            } else {
-                &p
+            let globs: Vec<String> = match req.get("globs") {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(serde_json::Value::Array(items)) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let pattern = item.as_str().ok_or("semantic glob must be a string")?;
+                        out.push(pattern.to_owned());
+                    }
+                    out
+                }
+                Some(_) => return Err("semantic globs must be an array of strings".into()),
             };
-            if scope != root.as_path() {
-                return Err(
-                    "directory-scoped semantic queries are not supported by the live index API"
-                        .into(),
-                );
-            }
+            let scope_path = if whole_repo {
+                None
+            } else {
+                let relative = p
+                    .strip_prefix(&root)
+                    .map_err(|_| "query path is outside the attached root")?;
+                if relative.as_os_str().is_empty() {
+                    None
+                } else if p.is_file() {
+                    Some(ScopePath::File(relative.to_path_buf()))
+                } else {
+                    Some(ScopePath::Directory(relative.to_path_buf()))
+                }
+            };
+            let min_score = match req.get("min_score") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_f64()
+                        .ok_or("min_score must be a finite number in [-1, 1]")?,
+                ),
+            };
+            let scope = SemanticScope::with_min_score(scope_path, &globs, min_score)?;
             let deadline = Instant::now() + FRAME_TIMEOUT;
             loop {
                 wait_root(service, &root, &pending, &lost, deadline)?;
                 let generation = index.stats().generation;
-                let rows = index.query_with_mode(query, n, req["explain"] == true, rank, saturate)?;
+                let rows =
+                    index.query_scoped(query, n, req["explain"] == true, rank, saturate, &scope)?;
                 wait_root(service, &root, &pending, &lost, deadline)?;
                 if generation == index.stats().generation {
                     return Ok(serde_json::json!({"ok":true,"results":rows}));
@@ -1303,12 +1339,14 @@ pub fn query(
     model: &str,
     rank: &str,
     saturate: bool,
+    globs: &[String],
+    min_score: Option<f64>,
 ) -> Result<serde_json::Value> {
     load_metadata().map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
         "no wg service is running for this cache; run `wg up` first".into()
     })?;
     request(
-        serde_json::json!({"op":"query","query":query,"path":path,"whole_repo":whole_repo,"top_n":n,"explain":explain,"model":model,"rank":rank,"saturate":saturate}),
+        serde_json::json!({"op":"query","query":query,"path":path,"whole_repo":whole_repo,"top_n":n,"explain":explain,"model":model,"rank":rank,"saturate":saturate,"globs":globs,"min_score":min_score}),
     )
 }
 
@@ -1370,25 +1408,72 @@ mod tests {
         }
     }
     #[test]
-    fn text_status_building_means_a_rebuild_is_due() {
-        // An idle daemon with a lazily pending rescan is not building: the
-        // human status shows it as `reconciling`, and `building` stays false.
+    fn text_status_separates_pending_work_from_active_work() {
+        // A lazy rescan is due, but no walk runs: `building` stays false and
+        // `needs_rescan` carries the pending state.
         let rescan = decorate_text_status(serde_json::json!({
+            "postings": 12,
+            "indexed": 9,
             "files": 10,
             "added": 1,
             "pending": 0,
             "needs_rescan": true,
+            "rescanning": false,
+            "rebuilding": false,
         }));
         assert_eq!(rescan["building"], false, "{rescan}");
         assert_eq!(rescan["needs_rescan"], true, "{rescan}");
+        assert_eq!(rescan["indexed"], 9, "{rescan}");
+        assert_eq!(rescan["files"], 10, "{rescan}");
+        assert_eq!(rescan["postings"], 12, "{rescan}");
 
+        // A racy added file means a rebuild may run, but none runs now.
         let pending = decorate_text_status(serde_json::json!({
+            "indexed": 9,
             "files": 10,
             "added": 1,
             "pending": 1,
             "needs_rescan": true,
+            "rescanning": false,
+            "rebuilding": false,
         }));
-        assert_eq!(pending["building"], true, "{pending}");
+        assert_eq!(pending["building"], false, "{pending}");
+        assert_eq!(pending["pending"], 1, "{pending}");
+
+        // Only an actual reconcile or rebuild is `building`.
+        let reconciling = decorate_text_status(serde_json::json!({
+            "indexed": 9,
+            "files": 10,
+            "added": 1,
+            "pending": 0,
+            "needs_rescan": false,
+            "rescanning": true,
+            "rebuilding": false,
+        }));
+        assert_eq!(reconciling["building"], true, "{reconciling}");
+        let rebuilding = decorate_text_status(serde_json::json!({
+            "indexed": 9,
+            "files": 10,
+            "added": 1,
+            "pending": 1,
+            "needs_rescan": false,
+            "rescanning": false,
+            "rebuilding": true,
+        }));
+        assert_eq!(rebuilding["building"], true, "{rebuilding}");
+    }
+
+    #[test]
+    fn text_status_falls_back_to_engine_totals() {
+        // Older engine payloads carry no `indexed` or `files` split. Derive
+        // the live indexed count from the total and the added files.
+        let value = decorate_text_status(serde_json::json!({
+            "files": 10,
+            "added": 1,
+        }));
+        assert_eq!(value["indexed"], 9, "{value}");
+        assert_eq!(value["files"], 10, "{value}");
+        assert_eq!(value["building"], false, "{value}");
     }
 
     #[test]

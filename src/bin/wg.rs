@@ -14,8 +14,9 @@ const HELP: &str = "\
 wg: semantic code search with ripgrep-compatible filesystem search.
 
 usage:
-  wg QUERY [ROOT] [--top N|-k N] [--json] [--explain] [--model auto|code|text]
-           [--rank semantic|classic] [--saturate]
+  wg QUERY [SCOPE] [--top N|-k N] [--json] [--explain] [--model auto|code|text]
+           [--rank semantic|classic] [--saturate] [--semantic-glob GLOB]...
+           [--min-score SCORE]
   wg [RIPGREP-FLAGS] PATTERN [PATH...]
   wg up [PATH] [--model auto|code|text] [--json]
   wg status [--json]
@@ -25,6 +26,14 @@ Semantic fused ranking is the default. The default ranker boosts file
 coherence, whole-query symbol definitions and natural-language file-stem
 matches. --rank classic selects the pinned sgrep ranker (exact parity).
 --saturate adds opt-in per-file diversity in the first ten positions.
+SCOPE limits semantic search to one file or directory under an attached root.
+--semantic-glob adds a root-relative include glob; prefix it with ! to exclude.
+Includes are OR-ed and any exclude vetoes a match. A glob without / matches a
+file name at any depth; a glob with / is root-relative. -g stays ripgrep-only.
+--min-score keeps only results whose raw cosine similarity is at least SCORE.
+SCORE must be finite and in [-1, 1]. The cutoff applies before the shortlist
+fills, and there is no default cutoff. Relative and fused scores are ranking
+values, not confidence.
 A familiar ripgrep flag such as -F, -e, -n, -l, -g or --files selects the
 in-process ripgrep 15.1.0 engine. wg then returns rg's stdout/stderr and exit
 status (0 match, 1 no match, 2 error). The filesystem route is a real walk,
@@ -37,6 +46,8 @@ not the semantic index. It does not need an rg binary on PATH.
   --model M         auto|code|text (semantic route)
   --rank M          semantic (default) or classic (sgrep parity)
   --saturate        decay repeated chunks of one file in the top 10
+  --semantic-glob G repeatable include glob; !G excludes (semantic route)
+  --min-score S     raw cosine cutoff in [-1, 1]; no default (semantic route)
   --cache-dir DIR   model and parser asset cache (global prefix)
   -h, --help        this help
   -V, --version     version";
@@ -204,10 +215,12 @@ fn run_service(name: &str, rest: &[String], cache: Option<PathBuf>) -> Result<Ex
                         root["generation"]
                     );
                     if let Some(text) = root.get("text") {
-                        let phase = if text["building"] == true {
-                            "building"
+                        let phase = if text["rescanning"] == true {
+                            "rescanning"
+                        } else if text["rebuilding"] == true {
+                            "rebuilding"
                         } else if text["needs_rescan"] == true {
-                            "reconciling"
+                            "rescan pending"
                         } else {
                             "current"
                         };
@@ -263,6 +276,8 @@ fn run_semantic(semantic: Semantic) -> Result<ExitCode> {
         &semantic.model,
         &semantic.rank,
         semantic.saturate,
+        &semantic.globs,
+        semantic.min_score,
     )?;
     let results = r["results"].as_array().ok_or("invalid service response")?;
     if semantic.json {

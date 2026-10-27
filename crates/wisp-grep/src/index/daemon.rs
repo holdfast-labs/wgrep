@@ -217,6 +217,10 @@ pub(crate) struct State {
     /// tree, and its own reads fire events). Any dropped event just escalates
     /// to another reconcile, so nothing is lost.
     reconciling: Arc<AtomicBool>,
+    /// Set while the background rebuild thread builds a new generation.
+    /// Unlike `reconciling`, the rebuild does not hold the state lock, so
+    /// status can read this flag at once.
+    rebuilding: Arc<AtomicBool>,
     /// Set when an event arrives during a reconcile.
     missed: Arc<AtomicBool>,
     /// A walked path could not be expressed as UTF-8 relative to the root, so
@@ -255,6 +259,7 @@ impl State {
             added_rebuilt: 0,
             build_started_ns: None,
             reconciling,
+            rebuilding: Arc::new(AtomicBool::new(false)),
             missed,
             unprunable: false,
         }
@@ -267,6 +272,13 @@ impl State {
     }
 
     /// Live counters for `wg status`.
+    ///
+    /// `postings` counts the records in the persisted index. A delete only
+    /// clears the live flag for a record until a rebuild writes a new index,
+    /// so `postings` can exceed the file set that exists now. `indexed` counts
+    /// the live records, `added` counts walked files that the index does not
+    /// hold, and `files` is their sum. `files` therefore matches the file
+    /// count a text query reports for the root.
     pub(crate) fn text_stats(&self) -> serde_json::Value {
         let rebuild_pending = self.added_epoch != self.added_rebuilt;
         let pending = if rebuild_pending {
@@ -275,13 +287,19 @@ impl State {
             0
         };
         let unindexed = self.added.len() - pending;
+        let postings = self.index.file_count();
+        let indexed = self.ids.iter().filter(|id| id.seen).count();
         serde_json::json!({
-            "files": self.index.file_count(),
+            "postings": postings,
+            "indexed": indexed,
+            "files": indexed + self.added.len(),
             "dirty": self.dirty,
             "added": self.added.len(),
             "pending": pending,
             "unindexed": unindexed,
             "needs_rescan": self.needs_rescan,
+            "rescanning": self.reconciling.load(Ordering::Relaxed),
+            "rebuilding": self.rebuilding.load(Ordering::Relaxed),
             "unprunable": self.unprunable,
             "walks": {
                 "startup": self.walks.startup,
@@ -1342,6 +1360,7 @@ pub(crate) fn serve(path: &OsString) -> anyhow::Result<()> {
         added_rebuilt: 0,
         build_started_ns: built_now.then_some(build_started_ns).flatten(),
         reconciling: reconciling.clone(),
+        rebuilding: Arc::new(AtomicBool::new(false)),
         missed: missed.clone(),
         unprunable: false,
     };
@@ -1781,11 +1800,17 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
         }
         last = Instant::now();
         let build_started_ns = build::mtime_ns_now();
+        let rebuilding = state.read().unwrap().rebuilding.clone();
+        rebuilding.store(true, Ordering::SeqCst);
         if let Err(err) = rebuild(&args, &root, &root_arg) {
+            rebuilding.store(false, Ordering::SeqCst);
             eprintln!("wgrep: rebuild failed: {err:#}");
             continue;
         }
-        let Some(file) = store::current(&root) else { continue };
+        let Some(file) = store::current(&root) else {
+            rebuilding.store(false, Ordering::SeqCst);
+            continue;
+        };
         match Index::open(&file) {
             Ok(index) => {
                 let mut s = state.write().unwrap();
@@ -1794,6 +1819,7 @@ pub(crate) fn rebuild_loop(state: Arc<RwLock<State>>, args: HiArgs, root: PathBu
             }
             Err(err) => eprintln!("wgrep: cannot open rebuilt index: {err}"),
         }
+        rebuilding.store(false, Ordering::SeqCst);
         trim_working_set();
     }
 }
@@ -2188,6 +2214,7 @@ mod tests {
             added_rebuilt: 0,
             build_started_ns: None,
             reconciling: Arc::new(AtomicBool::new(false)),
+            rebuilding: Arc::new(AtomicBool::new(false)),
             missed: Arc::new(AtomicBool::new(false)),
             unprunable: false,
         }
@@ -2257,6 +2284,47 @@ mod tests {
         assert_eq!(stats["pending"].as_u64(), Some(1), "{stats}");
         assert_eq!(stats["unindexed"].as_u64(), Some(1), "{stats}");
         assert_eq!(state.added_epoch, 1);
+    }
+
+    #[test]
+    fn deleted_record_stays_a_posting_but_not_a_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut state = state_for(&root, one_file_index(&root, "gone.rs"));
+
+        let before = state.text_stats();
+        assert_eq!(before["postings"].as_u64(), Some(1), "{before}");
+        assert_eq!(before["indexed"].as_u64(), Some(1), "{before}");
+        assert_eq!(before["files"].as_u64(), Some(1), "{before}");
+
+        state.apply_gone("gone.rs");
+        let after = state.text_stats();
+        assert_eq!(
+            after["postings"].as_u64(),
+            Some(1),
+            "the immutable index still holds the record: {after}"
+        );
+        assert_eq!(after["indexed"].as_u64(), Some(0), "{after}");
+        assert_eq!(after["files"].as_u64(), Some(0), "{after}");
+        assert_eq!(after["added"].as_u64(), Some(0), "{after}");
+    }
+
+    #[test]
+    fn text_stats_reports_active_work_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let state = state_for(&root, one_file_index(&root, "live.rs"));
+
+        let idle = state.text_stats();
+        assert_eq!(idle["rescanning"], false, "{idle}");
+        assert_eq!(idle["rebuilding"], false, "{idle}");
+
+        state.rebuilding.store(true, Ordering::SeqCst);
+        assert_eq!(state.text_stats()["rebuilding"], true);
+        state.rebuilding.store(false, Ordering::SeqCst);
+
+        state.reconciling.store(true, Ordering::SeqCst);
+        assert_eq!(state.text_stats()["rescanning"], true);
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! Ranking signals shared by the `no sat` semantic default and the analysis
 //! tool `bench/WG_QUALITY_TOOL`.
 //!
-//! The functions here are a direct port of the reference implementation:
+//! The functions here are a port of the reference implementation:
 //! whole-query symbol detection, definition-name normalisation, the narrow
 //! per-language definition sites, the natural-language file-stem/path boost,
-//! and the multi-chunk file coherence boost. The classic ranker never calls
-//! them, so its output and scores stay byte-identical.
+//! and the multi-chunk file coherence boost. The stem/path boost damps one
+//! matched word among several query words, so one common word cannot act as a
+//! large file-name bonus. The classic ranker never calls these functions, so
+//! its output and scores stay byte-identical.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -213,7 +215,8 @@ fn keyword_matches(keywords: &HashSet<String>, parts: &HashSet<String>) -> usize
     n
 }
 
-/// Semble's NL file-stem/path boost for one path, in [0, 1].
+/// Semble's NL file-stem/path boost for one path, in [0, 1]. One matched word
+/// among several query words gets half the ratio.
 pub(crate) fn stem_path_score(
     path: &str,
     keywords: &HashSet<String>,
@@ -245,13 +248,34 @@ pub(crate) fn stem_path_score(
     }
     let n = keyword_matches(keywords, &parts);
     let score = if n > 0 {
-        let ratio = n as f64 / keywords.len() as f64;
+        let mut ratio = n as f64 / keywords.len() as f64;
+        // One matched word among several is a weak signal. Common words such
+        // as "surface" then act as a file-name bonus that is too large. Damp
+        // only that case; a single-keyword query and a multi-word match keep
+        // the full ratio.
+        if n == 1 && keywords.len() > 1 {
+            ratio *= 0.5;
+        }
         if ratio >= 0.10 { ratio } else { 0.0 }
     } else {
         0.0
     };
     cache.insert(path.to_string(), score);
     score
+}
+
+/// True when two 1-based inclusive line spans share at least half of the
+/// shorter span. The ranker uses this to drop substantial same-file overlap
+/// before it fills the shortlist, and to keep separate regions.
+pub(crate) fn spans_substantially_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
+    let lo = a.0.max(b.0);
+    let hi = a.1.min(b.1);
+    if hi < lo {
+        return false;
+    }
+    let overlap = hi - lo + 1;
+    let shorter = (a.1 - a.0 + 1).min(b.1 - b.0 + 1);
+    overlap.saturating_mul(2) >= shorter
 }
 
 /// Query words of 3+ characters that are not stopwords, for the stem boost.
@@ -368,13 +392,33 @@ mod tests {
     }
 
     #[test]
-    fn stem_path_ratio_uses_the_keyword_count() {
+    fn stem_path_damps_one_matched_word_among_many() {
         let kw: HashSet<String> = ["parser", "zzz", "yyy", "xxx"]
             .into_iter()
             .map(str::to_owned)
             .collect();
         let mut cache = HashMap::new();
-        assert!((stem_path_score("src/parser.rs", &kw, &mut cache) - 0.25).abs() < 1e-12);
+        assert!((stem_path_score("src/parser.rs", &kw, &mut cache) - 0.125).abs() < 1e-12);
+
+        let full: HashSet<String> = ["parser", "read"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut cache = HashMap::new();
+        assert_eq!(stem_path_score("src/parser/reader.rs", &full, &mut cache), 1.0);
+
+        let single: HashSet<String> = ["parser"].into_iter().map(str::to_owned).collect();
+        let mut cache = HashMap::new();
+        assert_eq!(stem_path_score("src/parser.rs", &single, &mut cache), 1.0);
+    }
+
+    #[test]
+    fn substantial_overlap_uses_half_the_shorter_span() {
+        assert!(spans_substantially_overlap((1, 60), (20, 80)));
+        assert!(spans_substantially_overlap((1, 10), (5, 10)));
+        assert!(spans_substantially_overlap((1, 1), (1, 5)));
+        assert!(!spans_substantially_overlap((1, 60), (50, 120)));
+        assert!(!spans_substantially_overlap((1, 10), (11, 20)));
     }
 
     #[test]

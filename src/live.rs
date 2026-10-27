@@ -1,7 +1,7 @@
 //! Mutable, atomically published sgrep-compatible corpus snapshots.
 use crate::{
     CODE, Chunk, LoadedModel, ModelChoice, RankMode, Result, TEXT, cache, identifier_pattern,
-    is_prose, make_chunk, rank_impl, words,
+    is_prose, make_chunk, rank_impl, semantic_scope::SemanticScope, words,
 };
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
@@ -282,6 +282,44 @@ impl LexicalIndex {
                 let length = self.lengths[chunk as usize] as f64;
                 scores[chunk as usize] +=
                     idf * count * 2.5 / (count + 1.5 * (0.25 + 0.75 * length / self.average));
+            }
+        }
+        scores
+    }
+
+    /// BM25 over an eligible subset of rows. Term document frequency and the
+    /// average row length use only the selected rows, so score normalization
+    /// starts from the filtered corpus rather than the whole snapshot.
+    fn bm25_subset(&self, terms: &[String], selected: &[usize]) -> Vec<f64> {
+        let corpus_len = selected.len();
+        let mut positions = vec![u32::MAX; self.lengths.len()];
+        for (position, &chunk) in selected.iter().enumerate() {
+            positions[chunk] = position as u32;
+        }
+        let total: usize = selected
+            .iter()
+            .map(|&chunk| self.lengths[chunk] as usize)
+            .sum();
+        let average = (total as f64 / corpus_len.max(1) as f64).max(1.0);
+        let mut scores = vec![-0.0f64; corpus_len];
+        for term in terms {
+            let Some(&id) = self.lookup.get(term.as_str()) else {
+                continue;
+            };
+            let df = self.postings[id as usize]
+                .iter()
+                .filter(|&&(chunk, _)| positions[chunk as usize] != u32::MAX)
+                .count() as f64;
+            let idf = (1.0 + (corpus_len as f64 - df + 0.5) / (df + 0.5)).ln();
+            for &(chunk, count) in self.postings[id as usize].iter() {
+                let position = positions[chunk as usize];
+                if position == u32::MAX {
+                    continue;
+                }
+                let count = count as f64;
+                let length = self.lengths[chunk as usize] as f64;
+                scores[position as usize] +=
+                    idf * count * 2.5 / (count + 1.5 * (0.25 + 0.75 * length / average));
             }
         }
         scores
@@ -2836,6 +2874,30 @@ impl LiveIndex {
         mode: RankMode,
         saturate: bool,
     ) -> Result<Vec<Chunk>> {
+        self.query_scoped(
+            query,
+            top_n,
+            explain,
+            mode,
+            saturate,
+            &SemanticScope::default(),
+        )
+    }
+
+    /// Query with an explicit ranking mode and a root-relative scope.
+    ///
+    /// Scope filtering and the raw cosine cutoff run before candidate
+    /// selection, BM25 statistics and relative score normalization, so a query
+    /// with no scope and no cutoff keeps the exact existing behavior.
+    pub fn query_scoped(
+        &self,
+        query: &str,
+        top_n: usize,
+        explain: bool,
+        mode: RankMode,
+        saturate: bool,
+        scope: &SemanticScope,
+    ) -> Result<Vec<Chunk>> {
         if saturate && mode == RankMode::Classic {
             return Err("saturation requires the semantic ranking mode".into());
         }
@@ -2852,6 +2914,11 @@ impl LiveIndex {
         }
         if snapshot.chunks.is_empty() {
             return Ok(Vec::new());
+        }
+        if !scope.is_unfiltered() {
+            return self.query_filtered(
+                &snapshot, &terms, query, top_n, explain, mode, saturate, scope,
+            );
         }
         // The compact postings touch only matching chunks. Contributions reach
         // each chunk in query-term order, as the old per-chunk map scan did.
@@ -2889,6 +2956,98 @@ impl LiveIndex {
             |i| Ok((*snapshot.chunks[i]).clone()),
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn query_filtered(
+        &self,
+        snapshot: &Snapshot,
+        terms: &[String],
+        query: &str,
+        top_n: usize,
+        explain: bool,
+        mode: RankMode,
+        saturate: bool,
+        scope: &SemanticScope,
+    ) -> Result<Vec<Chunk>> {
+        let selected = scoped_chunk_indices(&snapshot.chunks, scope);
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q = snapshot.model.embed(vec![query.to_string()])?.remove(0);
+        let cutoff = scope.min_score();
+        let mut eligible: Vec<usize> = Vec::with_capacity(selected.len());
+        let mut similarities: Vec<f64> = Vec::with_capacity(selected.len());
+        for &i in &selected {
+            let similarity = snapshot.vectors[i]
+                .as_slice()
+                .iter()
+                .zip(&q)
+                .map(|(a, b)| a * b)
+                .sum::<f32>() as f64;
+            if cutoff.is_none_or(|min| similarity >= min) {
+                eligible.push(i);
+                similarities.push(similarity);
+            }
+        }
+        if eligible.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lexical = snapshot.lexical.bm25_subset(terms, &eligible);
+        let mut exact = HashSet::new();
+        if let Some((pattern, _)) = identifier_pattern(query)? {
+            for (position, &i) in eligible.iter().enumerate() {
+                if pattern.is_match(&snapshot.chunks[i].content) {
+                    exact.insert(position);
+                }
+            }
+        }
+        let rows: Vec<Arc<Chunk>> = eligible
+            .iter()
+            .map(|&i| snapshot.chunks[i].clone())
+            .collect();
+        rank_impl(
+            rows.len(),
+            &lexical,
+            &similarities,
+            Vec::new(),
+            &exact,
+            false,
+            explain,
+            top_n,
+            query,
+            mode,
+            saturate,
+            &rows,
+            |i| Ok((*rows[i]).clone()),
+        )
+    }
+}
+
+/// Indices of chunks whose file path is inside `scope`, in chunk order.
+///
+/// Chunks of one file are adjacent in a snapshot, so evaluate the scope once
+/// per file run instead of once per chunk. At about 89k chunks the same file
+/// path repeats several times, and a glob scope is not cheap to test. A path
+/// can also return in a later run, so only a consecutive repeat reuses the
+/// previous result.
+fn scoped_chunk_indices(chunks: &[Arc<Chunk>], scope: &SemanticScope) -> Vec<usize> {
+    let mut selected = Vec::new();
+    let mut previous: Option<(&str, bool)> = None;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let path = chunk.path.as_ref();
+        let matched = match previous {
+            Some((last, matched)) if last == path => matched,
+            _ => {
+                let matched = scope.matches(Path::new(path));
+                previous = Some((path, matched));
+                matched
+            }
+        };
+        if matched {
+            selected.push(index);
+        }
+    }
+    selected
 }
 
 fn normalize(p: &Path) -> PathBuf {
@@ -2899,6 +3058,7 @@ fn normalize(p: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::Searcher;
+    use crate::semantic_scope::ScopePath;
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -2960,6 +3120,149 @@ mod tests {
         assert!(
             live.relative(&root.join("..").join("escape.rs")).is_err(),
             "path outside the root must be rejected"
+        );
+    }
+
+    #[test]
+    fn scoped_chunk_indices_keeps_every_chunk_of_each_matching_file() {
+        let chunks: Vec<Arc<Chunk>> = [
+            ("src/a.rs", "first"),
+            ("src/a.rs", "second"),
+            ("src/b.rs", "other"),
+            ("src/a.rs", "again"),
+        ]
+        .iter()
+        .map(|(path, content)| Arc::new(crate::make_chunk(*path, 1, 2, (*content).to_owned())))
+        .collect();
+
+        let directory =
+            SemanticScope::new(Some(ScopePath::Directory(PathBuf::from("src"))), &[]).unwrap();
+        assert_eq!(scoped_chunk_indices(&chunks, &directory), [0, 1, 2, 3]);
+
+        let file = SemanticScope::new(
+            Some(ScopePath::File(PathBuf::from("src").join("a.rs"))),
+            &[],
+        )
+        .unwrap();
+        // The last row repeats a path after another file; it must still count.
+        assert_eq!(scoped_chunk_indices(&chunks, &file), [0, 1, 3]);
+
+        let excluded = SemanticScope::new(None, &["!a.rs".to_owned()]).unwrap();
+        assert_eq!(scoped_chunk_indices(&chunks, &excluded), [2]);
+    }
+
+    #[test]
+    fn scoped_queries_stay_inside_a_file_or_directory_and_can_be_empty() {
+        let (_dir, root) = fixture();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(
+            root.join("sub").join("inside.rs"),
+            "fn scoped_inside_value() {}\n",
+        )
+        .unwrap();
+        let pool = Arc::new(ModelPool::new(None));
+        let live = LiveIndex::open(&root, ModelChoice::Code, pool).unwrap();
+
+        let file = SemanticScope::new(
+            Some(ScopePath::File(PathBuf::from("sub").join("inside.rs"))),
+            &[],
+        )
+        .unwrap();
+        let rows = live
+            .query_scoped(
+                "scoped_inside_value",
+                10,
+                false,
+                RankMode::Semantic,
+                false,
+                &file,
+            )
+            .unwrap();
+        let wanted = PathBuf::from("sub").join("inside.rs");
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| Path::new(row.path.as_ref()) == wanted.as_path())
+        );
+
+        let directory =
+            SemanticScope::new(Some(ScopePath::Directory(PathBuf::from("sub"))), &[]).unwrap();
+        let rows = live
+            .query_scoped(
+                "scoped_inside_value",
+                10,
+                false,
+                RankMode::Semantic,
+                false,
+                &directory,
+            )
+            .unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| Path::new(row.path.as_ref()).starts_with("sub"))
+        );
+
+        let empty = SemanticScope::new(
+            Some(ScopePath::Directory(PathBuf::from("sub"))),
+            &["!sub/**".to_owned()],
+        )
+        .unwrap();
+        assert!(
+            live.query_scoped(
+                "scoped_inside_value",
+                10,
+                false,
+                RankMode::Semantic,
+                false,
+                &empty,
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn min_score_cutoff_filters_before_ranking_and_can_empty_the_result() {
+        let (_dir, root) = fixture();
+        let pool = Arc::new(ModelPool::new(None));
+        let live = LiveIndex::open(&root, ModelChoice::Code, pool).unwrap();
+        let key = |rows: &[Chunk]| {
+            rows.iter()
+                .map(|row| (row.path.to_string(), row.start, row.end))
+                .collect::<Vec<_>>()
+        };
+
+        // A -1.0 cutoff cannot reject a normalized cosine, so it keeps every
+        // row and must not change the unfiltered result.
+        let all = live.query("useful value", 10, false).unwrap();
+        let unlimited = SemanticScope::with_min_score(None, &[], Some(-1.0)).unwrap();
+        let kept = live
+            .query_scoped(
+                "useful value",
+                10,
+                false,
+                RankMode::Semantic,
+                false,
+                &unlimited,
+            )
+            .unwrap();
+        assert_eq!(key(&all), key(&kept));
+
+        // No cosine in this fixture is exactly 1.0, so a 1.0 cutoff selects
+        // nothing. The cutoff runs before shortlist filling, not after it.
+        let impossible = SemanticScope::with_min_score(None, &[], Some(1.0)).unwrap();
+        assert!(
+            live.query_scoped(
+                "useful value",
+                10,
+                false,
+                RankMode::Semantic,
+                false,
+                &impossible,
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 

@@ -22,7 +22,8 @@ returns `Semantic`, `Lexical`, `Service`, `Daemon`, `Help`, or `Version`.
 
 The classifier knows the flags that `wg` owns: `--json`, `--explain`,
 `--saturate`, `-h`, `--help`, `-V`, `--version`, `--top`, `-k`, `--model`,
-`--rank`, and `--cache-dir`. A flag outside that set selects the text route.
+`--rank`, `--semantic-glob`, `--min-score`, and `--cache-dir`.
+A flag outside that set selects the text route.
 
 A bare `wg PATTERN` has no flags, so it stays semantic. `wg QUERY --json` also
 stays semantic because `--json` alone is a `wg` flag. Add `-F`, `-e`, `-n`,
@@ -31,7 +32,8 @@ stays semantic because `--json` alone is a `wg` flag. Add `-F`, `-e`, `-n`,
 text `-F`.
 
 The semantic options `--top`, `-k`, `--model`, `--explain`, `--rank`, and
-`--saturate` do not mix with ripgrep flags. `wg` rejects that combination. `-n`
+`--saturate`, `--semantic-glob`, and `--min-score` do not mix with ripgrep flags.
+`wg` rejects that combination. `-n`
 is a ripgrep flag, so it selects line numbers and the text route.
 
 ## 2. The daemon
@@ -103,6 +105,12 @@ The query is split into words, lowercased, and stripped of stop words. The
 lexical side uses BM25. The semantic side uses the f32 dot product between the
 query vector and each L2-normalized passage vector, which is cosine similarity.
 
+An explicit scope path and `--semantic-glob` filters first select eligible
+chunks from the attached snapshot. `--min-score` can exclude chunks below a
+raw cosine cutoff. BM25 statistics use the eligible subset. The default query
+without these filters keeps the original whole-root path. No default cutoff
+applies. Relative and fused scores are ranking values, not confidence values.
+
 The ranker keeps the top 200 lexical chunks with a positive score and the top
 200 semantic chunks. It takes their union and adds exact identifier matches.
 Each signal is min-max normalized over that union. The base fused score is:
@@ -127,14 +135,18 @@ score = base + file_coherence + symbol_definition + file_stem
 - **File stem/path:** for a non-symbol query, match query words of 3 or more
   characters against the file stem and parent directory name. Use an exact or
   3-character prefix match. Let `ratio = matches / keywords`; if
-  `ratio >= 0.10`, add `0.6 * ratio`.
+   exactly one word matches among several keywords, halve the ratio first.
+   If `ratio >= 0.10`, add `0.6 * ratio`.
 
 Exact identifier matches still sort first. Ties break by the final score, then
-by raw BM25. A result contained in an earlier result from the same path is
-removed. The default count is 5; `--top` and `-k` allow 1 to 100.
+by raw BM25. Semantic ranking removes a same-file span when it shares at least
+half of the shorter span with an earlier result. It applies this rule before
+the shortlist fills, with or without saturation. The default count is 5;
+`--top` and `-k` allow 1 to 100.
 
 `--rank classic` selects the old ranker: `score = base` and no added signals. It
-is the pinned sgrep path and keeps exact row and score parity.
+is the pinned sgrep path and keeps exact row and score parity for unfiltered
+queries. It retains the original full-containment duplicate rule.
 
 `--saturate` is opt-in. In the first ten positions, a chunk's effective score is
 `score * 0.5^count[file]`, where `count[file]` is the number of chunks already
