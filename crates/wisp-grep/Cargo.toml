@@ -31,7 +31,7 @@ bstr = "=1.12.0"
 grep = "=0.4.1"
 ignore = "=0.4.24"
 lexopt = "=0.3.1"
-log = "=0.4.28"
+log = "=0.4.34"
 # rg 15.1.0 pins 1.0.145. The root crate's tree-sitter 0.27 requires
 # >=1.0.150, so 1.0.151 is the single version both trees can use. Parity is
 # re-proved against rg 15.1.0.
